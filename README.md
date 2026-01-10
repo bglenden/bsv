@@ -22,7 +22,7 @@ A terminal user interface (TUI) for viewing and navigating [Beads](https://githu
 Requires [Rust](https://rustup.rs/) and the [bd CLI](https://github.com/steveyegge/beads) to be installed.
 
 ```bash
-git clone https://github.com/yourusername/bsv.git
+git clone https://github.com/bglenden/bsv.git
 cd bsv
 cargo build --release
 ```
