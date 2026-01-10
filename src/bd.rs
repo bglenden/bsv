@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::process::Command;
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct Issue {
     pub id: String,
     pub title: String,

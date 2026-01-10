@@ -16,7 +16,7 @@ fn markdown_to_lines(text: &str) -> Vec<Line<'static>> {
 
     for line in text.lines() {
         // Check for code block fence
-        if line.starts_with("```") {
+        if let Some(lang) = line.strip_prefix("```") {
             if in_code_block {
                 // End of code block
                 in_code_block = false;
@@ -24,7 +24,7 @@ fn markdown_to_lines(text: &str) -> Vec<Line<'static>> {
             } else {
                 // Start of code block
                 in_code_block = true;
-                code_block_lang = line[3..].trim().to_string();
+                code_block_lang = lang.trim().to_string();
                 // Show language tag if present
                 if !code_block_lang.is_empty() {
                     lines_out.push(Line::from(Span::styled(
@@ -64,37 +64,37 @@ fn markdown_line_to_spans(line: &str) -> Line<'static> {
         ));
     }
 
-    // Handle headers
-    if line.starts_with("### ") {
+    // Handle headers (check longest prefix first)
+    if let Some(text) = line.strip_prefix("### ") {
         return Line::from(Span::styled(
-            line[4..].to_string(),
+            text.to_string(),
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
     }
-    if line.starts_with("## ") {
+    if let Some(text) = line.strip_prefix("## ") {
         return Line::from(Span::styled(
-            line[3..].to_string(),
+            text.to_string(),
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
     }
-    if line.starts_with("# ") {
+    if let Some(text) = line.strip_prefix("# ") {
         return Line::from(Span::styled(
-            line[2..].to_string(),
+            text.to_string(),
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
     }
 
     // Handle blockquotes
-    if line.starts_with("> ") {
+    if let Some(text) = line.strip_prefix("> ") {
         return Line::from(vec![
             Span::styled("│ ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                line[2..].to_string(),
+                text.to_string(),
                 Style::default().fg(Color::White).add_modifier(Modifier::ITALIC),
             ),
         ]);
     }
-    if line.starts_with(">") && line.len() == 1 {
+    if line == ">" {
         return Line::from(Span::styled("│", Style::default().fg(Color::DarkGray)));
     }
 
@@ -338,10 +338,9 @@ fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: b
         .collect();
 
     let border_color = if focused { Color::Cyan } else { Color::DarkGray };
-    let title = if focused { " Issues " } else { " Issues " };
     let list = List::new(items)
         .block(Block::default()
-            .title(title)
+            .title(" Issues ")
             .title_bottom(Line::from(" ? for help ").centered())
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color)));

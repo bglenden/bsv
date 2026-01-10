@@ -153,7 +153,7 @@ impl EditState {
         // Find the end of the current line
         let after_cursor = &self.buffer[self.cursor..];
         if let Some(newline_pos) = after_cursor.find('\n') {
-            self.cursor = self.cursor + newline_pos;
+            self.cursor += newline_pos;
         } else {
             self.cursor = self.buffer.len();
         }

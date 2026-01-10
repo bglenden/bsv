@@ -227,6 +227,7 @@ impl IssueTree {
         eprintln!("=== End Dump ===");
     }
 
+    #[allow(dead_code)]
     pub fn has_children(&self, id: &str) -> bool {
         self.nodes.get(id).map(|n| !n.children.is_empty()).unwrap_or(false)
     }
