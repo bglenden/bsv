@@ -338,9 +338,11 @@ fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: b
         .collect();
 
     let border_color = if focused { Color::Cyan } else { Color::DarkGray };
+    let title = if focused { " Issues " } else { " Issues " };
     let list = List::new(items)
         .block(Block::default()
-            .title(" Issues ")
+            .title(title)
+            .title_bottom(Line::from(" ? for help ").centered())
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color)));
 
