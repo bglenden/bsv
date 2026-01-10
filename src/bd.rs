@@ -60,7 +60,7 @@ pub fn list_issues() -> Result<Vec<Issue>> {
 
 pub fn get_ready_ids() -> Result<std::collections::HashSet<String>> {
     let output = Command::new("bd")
-        .args(["ready", "--json"])
+        .args(["ready", "--json", "--limit", "0"])
         .output()
         .context("Failed to run bd ready")?;
 
