@@ -13,6 +13,7 @@ A terminal user interface (TUI) for viewing and navigating [Beads](https://githu
   - Red = Blocked (has unresolved dependencies)
   - Gray = Closed
 - **Markdown rendering**: Headers, code blocks, lists, tables, blockquotes, and inline formatting
+- **Inline editing**: Edit issue titles and descriptions directly in the TUI
 - **Auto-refresh**: Watches `.beads/` directory for changes
 - **State persistence**: Remembers expanded/collapsed state between sessions
 - **Mouse support**: Click to select issues, scroll wheel in details panel
@@ -61,7 +62,19 @@ OPTIONS:
 | `j` / `k` | Scroll up/down |
 | `g` / `G` | Go to top/bottom |
 | `h` / `←` | Return to tree |
+| `e` | Edit description |
+| `i` | Edit title |
 | Click | Focus panel |
+
+### Edit Mode
+| Key | Action |
+|-----|--------|
+| `Esc` | Cancel editing |
+| `Ctrl+S` | Save changes |
+| `Tab` | Next field (title → description) |
+| `Shift+Tab` | Previous field |
+| `Enter` | Newline (description) / Save & next (title) |
+| Arrow keys | Move cursor |
 
 ### Global
 | Key | Action |

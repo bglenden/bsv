@@ -15,6 +15,214 @@ pub enum Focus {
     Tree,
     Details,
 }
+
+/// Which field is currently being edited
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EditField {
+    Title,
+    Description,
+}
+
+/// State for inline editing of an issue
+#[derive(Debug, Clone)]
+pub struct EditState {
+    /// The issue ID being edited
+    pub issue_id: String,
+    /// Which field is being edited
+    pub field: EditField,
+    /// The original value (for cancel/revert)
+    pub original: String,
+    /// The current edited value
+    pub buffer: String,
+    /// Cursor position within the buffer (byte offset)
+    pub cursor: usize,
+    /// For multiline: which line the cursor is on (for display)
+    pub cursor_line: usize,
+    /// For multiline: column position within the line
+    pub cursor_col: usize,
+}
+
+impl EditState {
+    /// Create a new edit state for a field
+    pub fn new(issue_id: String, field: EditField, value: String) -> Self {
+        let cursor = value.len();
+        let (cursor_line, cursor_col) = Self::compute_line_col(&value, cursor);
+        EditState {
+            issue_id,
+            field,
+            original: value.clone(),
+            buffer: value,
+            cursor,
+            cursor_line,
+            cursor_col,
+        }
+    }
+
+    /// Compute line and column from byte offset
+    fn compute_line_col(text: &str, byte_offset: usize) -> (usize, usize) {
+        let prefix = &text[..byte_offset.min(text.len())];
+        let lines: Vec<&str> = prefix.split('\n').collect();
+        let line = lines.len().saturating_sub(1);
+        let col = lines.last().map(|l| l.chars().count()).unwrap_or(0);
+        (line, col)
+    }
+
+    /// Update cursor line/col after cursor movement
+    fn update_cursor_position(&mut self) {
+        let (line, col) = Self::compute_line_col(&self.buffer, self.cursor);
+        self.cursor_line = line;
+        self.cursor_col = col;
+    }
+
+    /// Insert a character at cursor position
+    pub fn insert_char(&mut self, c: char) {
+        self.buffer.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+        self.update_cursor_position();
+    }
+
+    /// Insert a string at cursor position
+    pub fn insert_str(&mut self, s: &str) {
+        self.buffer.insert_str(self.cursor, s);
+        self.cursor += s.len();
+        self.update_cursor_position();
+    }
+
+    /// Delete character before cursor (backspace)
+    pub fn delete_char_before(&mut self) {
+        if self.cursor > 0 {
+            // Find the previous character boundary
+            let prev_char_start = self.buffer[..self.cursor]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.buffer.remove(prev_char_start);
+            self.cursor = prev_char_start;
+            self.update_cursor_position();
+        }
+    }
+
+    /// Delete character at cursor (delete key)
+    pub fn delete_char_at(&mut self) {
+        if self.cursor < self.buffer.len() {
+            self.buffer.remove(self.cursor);
+            self.update_cursor_position();
+        }
+    }
+
+    /// Move cursor left
+    pub fn move_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor = self.buffer[..self.cursor]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.update_cursor_position();
+        }
+    }
+
+    /// Move cursor right
+    pub fn move_right(&mut self) {
+        if self.cursor < self.buffer.len() {
+            let next = self.buffer[self.cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.cursor + i)
+                .unwrap_or(self.buffer.len());
+            self.cursor = next;
+            self.update_cursor_position();
+        }
+    }
+
+    /// Move cursor to start of line (for multiline) or start of buffer (for single line)
+    pub fn move_to_line_start(&mut self) {
+        // Find the start of the current line
+        let before_cursor = &self.buffer[..self.cursor];
+        if let Some(newline_pos) = before_cursor.rfind('\n') {
+            self.cursor = newline_pos + 1;
+        } else {
+            self.cursor = 0;
+        }
+        self.update_cursor_position();
+    }
+
+    /// Move cursor to end of line (for multiline) or end of buffer (for single line)
+    pub fn move_to_line_end(&mut self) {
+        // Find the end of the current line
+        let after_cursor = &self.buffer[self.cursor..];
+        if let Some(newline_pos) = after_cursor.find('\n') {
+            self.cursor = self.cursor + newline_pos;
+        } else {
+            self.cursor = self.buffer.len();
+        }
+        self.update_cursor_position();
+    }
+
+    /// Move cursor up one line (for multiline fields)
+    pub fn move_up(&mut self) {
+        if self.cursor_line > 0 {
+            let lines: Vec<&str> = self.buffer.split('\n').collect();
+            let prev_line = lines[self.cursor_line - 1];
+            let target_col = self.cursor_col.min(prev_line.chars().count());
+
+            // Calculate byte offset for previous line
+            let mut offset = 0;
+            for (i, line) in lines.iter().enumerate() {
+                if i == self.cursor_line - 1 {
+                    // Add target column offset
+                    offset += line.char_indices()
+                        .nth(target_col)
+                        .map(|(i, _)| i)
+                        .unwrap_or(line.len());
+                    break;
+                }
+                offset += line.len() + 1; // +1 for newline
+            }
+            self.cursor = offset;
+            self.update_cursor_position();
+        }
+    }
+
+    /// Move cursor down one line (for multiline fields)
+    pub fn move_down(&mut self) {
+        let lines: Vec<&str> = self.buffer.split('\n').collect();
+        if self.cursor_line < lines.len() - 1 {
+            let next_line = lines[self.cursor_line + 1];
+            let target_col = self.cursor_col.min(next_line.chars().count());
+
+            // Calculate byte offset for next line
+            let mut offset = 0;
+            for (i, line) in lines.iter().enumerate() {
+                if i == self.cursor_line + 1 {
+                    // Add target column offset
+                    offset += line.char_indices()
+                        .nth(target_col)
+                        .map(|(i, _)| i)
+                        .unwrap_or(line.len());
+                    break;
+                }
+                offset += line.len() + 1; // +1 for newline
+            }
+            self.cursor = offset;
+            self.update_cursor_position();
+        }
+    }
+
+    /// Check if the buffer has been modified from the original
+    pub fn is_modified(&self) -> bool {
+        self.buffer != self.original
+    }
+
+    /// Revert to the original value
+    pub fn revert(&mut self) {
+        self.buffer = self.original.clone();
+        self.cursor = self.buffer.len();
+        self.update_cursor_position();
+    }
+}
+
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::prelude::*;
 use std::io;
@@ -33,6 +241,8 @@ struct App {
     last_selected_id: Option<String>,
     focus: Focus,
     detail_scroll: u16,
+    /// Active edit state (None when not editing)
+    edit_state: Option<EditState>,
 }
 
 impl App {
@@ -55,6 +265,7 @@ impl App {
             last_selected_id,
             focus: Focus::Tree,
             detail_scroll: 0,
+            edit_state: None,
         })
     }
 
@@ -97,7 +308,60 @@ impl App {
         }
     }
 
+    /// Check if we're currently in edit mode
+    fn is_editing(&self) -> bool {
+        self.edit_state.is_some()
+    }
+
+    /// Start editing a field of the current issue
+    fn start_edit(&mut self, field: EditField) {
+        if let Some(issue) = &self.selected_details {
+            let value = match field {
+                EditField::Title => issue.title.clone(),
+                EditField::Description => issue.description.clone().unwrap_or_default(),
+            };
+            self.edit_state = Some(EditState::new(
+                issue.id.clone(),
+                field,
+                value,
+            ));
+            self.focus = Focus::Details;
+        }
+    }
+
+    /// Cancel editing and discard changes
+    fn cancel_edit(&mut self) {
+        self.edit_state = None;
+    }
+
+    /// Save the current edit using bd update
+    fn save_edit(&mut self) -> Result<()> {
+        if let Some(ref edit) = self.edit_state {
+            if edit.is_modified() {
+                match edit.field {
+                    EditField::Title => {
+                        bd::update_issue_title(&edit.issue_id, &edit.buffer)?;
+                    }
+                    EditField::Description => {
+                        bd::update_issue_description(&edit.issue_id, &edit.buffer)?;
+                    }
+                }
+                // Refresh to pick up the changes
+                self.last_selected_id = None; // Force refresh of details
+                self.update_selected_details();
+            }
+        }
+        self.edit_state = None;
+        Ok(())
+    }
+
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // If in edit mode, handle edit keys first
+        if self.is_editing() {
+            self.handle_edit_key(code, modifiers);
+            return;
+        }
+
         // Handle focus-independent keys first
         match (code, modifiers) {
             // Quit
@@ -143,6 +407,132 @@ impl App {
         match self.focus {
             Focus::Tree => self.handle_tree_key(code, modifiers),
             Focus::Details => self.handle_details_key(code, modifiers),
+        }
+    }
+
+    fn handle_edit_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match (code, modifiers) {
+            // Escape cancels editing
+            (KeyCode::Esc, KeyModifiers::NONE) => {
+                self.cancel_edit();
+            }
+
+            // Ctrl+S or Ctrl+Enter saves
+            (KeyCode::Char('s'), KeyModifiers::CONTROL) |
+            (KeyCode::Enter, KeyModifiers::CONTROL) => {
+                let _ = self.save_edit();
+            }
+
+            // Enter in title field saves and moves to description
+            // Enter in description field inserts newline
+            (KeyCode::Enter, KeyModifiers::NONE) => {
+                if let Some(ref mut edit) = self.edit_state {
+                    match edit.field {
+                        EditField::Title => {
+                            // Save title and start editing description
+                            let _ = self.save_edit();
+                            self.start_edit(EditField::Description);
+                        }
+                        EditField::Description => {
+                            // Insert newline in description
+                            edit.insert_char('\n');
+                        }
+                    }
+                }
+            }
+
+            // Backspace deletes character before cursor
+            (KeyCode::Backspace, KeyModifiers::NONE) => {
+                if let Some(ref mut edit) = self.edit_state {
+                    edit.delete_char_before();
+                }
+            }
+
+            // Delete key deletes character at cursor
+            (KeyCode::Delete, KeyModifiers::NONE) => {
+                if let Some(ref mut edit) = self.edit_state {
+                    edit.delete_char_at();
+                }
+            }
+
+            // Arrow keys for cursor movement
+            (KeyCode::Left, KeyModifiers::NONE) => {
+                if let Some(ref mut edit) = self.edit_state {
+                    edit.move_left();
+                }
+            }
+            (KeyCode::Right, KeyModifiers::NONE) => {
+                if let Some(ref mut edit) = self.edit_state {
+                    edit.move_right();
+                }
+            }
+            (KeyCode::Up, KeyModifiers::NONE) => {
+                if let Some(ref mut edit) = self.edit_state {
+                    if edit.field == EditField::Description {
+                        edit.move_up();
+                    }
+                }
+            }
+            (KeyCode::Down, KeyModifiers::NONE) => {
+                if let Some(ref mut edit) = self.edit_state {
+                    if edit.field == EditField::Description {
+                        edit.move_down();
+                    }
+                }
+            }
+
+            // Home/End for line navigation
+            (KeyCode::Home, KeyModifiers::NONE) => {
+                if let Some(ref mut edit) = self.edit_state {
+                    edit.move_to_line_start();
+                }
+            }
+            (KeyCode::End, KeyModifiers::NONE) => {
+                if let Some(ref mut edit) = self.edit_state {
+                    edit.move_to_line_end();
+                }
+            }
+
+            // Regular character input
+            (KeyCode::Char(c), KeyModifiers::NONE) |
+            (KeyCode::Char(c), KeyModifiers::SHIFT) => {
+                if let Some(ref mut edit) = self.edit_state {
+                    edit.insert_char(c);
+                }
+            }
+
+            // Tab: in title mode, move to description; in description, insert spaces
+            (KeyCode::Tab, KeyModifiers::NONE) => {
+                if let Some(ref edit) = self.edit_state {
+                    match edit.field {
+                        EditField::Title => {
+                            // Save title and move to description
+                            let _ = self.save_edit();
+                            self.start_edit(EditField::Description);
+                        }
+                        EditField::Description => {
+                            // Insert spaces
+                            if let Some(ref mut edit) = self.edit_state {
+                                edit.insert_str("    ");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Shift+Tab: go back to title from description
+            (KeyCode::BackTab, KeyModifiers::SHIFT) |
+            (KeyCode::BackTab, KeyModifiers::NONE) => {
+                if let Some(ref edit) = self.edit_state {
+                    if edit.field == EditField::Description {
+                        // Save description and move back to title
+                        let _ = self.save_edit();
+                        self.start_edit(EditField::Title);
+                    }
+                }
+            }
+
+            _ => {}
         }
     }
 
@@ -243,6 +633,16 @@ impl App {
                 self.focus = Focus::Tree;
             }
 
+            // 'e' starts editing description
+            (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                self.start_edit(EditField::Description);
+            }
+
+            // 'i' starts editing title (like vim insert)
+            (KeyCode::Char('i'), KeyModifiers::NONE) => {
+                self.start_edit(EditField::Title);
+            }
+
             _ => {}
         }
     }
@@ -289,7 +689,16 @@ fn print_help() {
     println!("    j/k        Scroll up/down");
     println!("    g/G        Go to top/bottom");
     println!("    h/←        Return to tree");
+    println!("    e          Edit description");
+    println!("    i          Edit title");
     println!("    Click      Focus panel");
+    println!();
+    println!("EDIT MODE:");
+    println!("    Esc        Cancel editing");
+    println!("    Ctrl+S     Save changes");
+    println!("    Tab        Move to description (from title)");
+    println!("    Shift+Tab  Move to title (from description)");
+    println!("    Enter      Newline (description) / Save & next (title)");
     println!();
     println!("GLOBAL:");
     println!("    c          Toggle show/hide closed");
@@ -371,7 +780,7 @@ fn main() -> Result<()> {
     loop {
         let size = terminal.size()?;
         terminal.draw(|frame| {
-            ui::render(frame, &app.tree, app.selected_details.as_ref(), app.show_help, app.focus, app.detail_scroll);
+            ui::render(frame, &app.tree, app.selected_details.as_ref(), app.show_help, app.focus, app.detail_scroll, app.edit_state.as_ref());
         })?;
 
         // Check for file changes (non-blocking) with debounce

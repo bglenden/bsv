@@ -273,7 +273,7 @@ fn parse_inline_markdown(text: &str) -> String {
     text.to_string()
 }
 
-pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Issue>, show_help: bool, focus: crate::Focus, detail_scroll: u16) {
+pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Issue>, show_help: bool, focus: crate::Focus, detail_scroll: u16, edit_state: Option<&crate::EditState>) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -284,7 +284,7 @@ pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Iss
 
     // Use full details if available (has dependencies), otherwise fall back to tree node
     let issue_for_details = selected_details.or_else(|| tree.selected_node().map(|n| &n.issue));
-    render_detail_panel(frame, issue_for_details, &tree.ready_ids, chunks[1], !tree_focused, detail_scroll);
+    render_detail_panel(frame, issue_for_details, &tree.ready_ids, chunks[1], !tree_focused, detail_scroll, edit_state);
 
     if show_help {
         render_help_overlay(frame);
@@ -349,14 +349,20 @@ fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: b
     frame.render_widget(list, area);
 }
 
-fn render_detail_panel(frame: &mut Frame, issue: Option<&Issue>, ready_ids: &std::collections::HashSet<String>, area: Rect, focused: bool, scroll: u16) {
+fn render_detail_panel(frame: &mut Frame, issue: Option<&Issue>, ready_ids: &std::collections::HashSet<String>, area: Rect, focused: bool, scroll: u16, edit_state: Option<&crate::EditState>) {
+    // If we're in edit mode, render the edit UI
+    if let Some(edit) = edit_state {
+        render_edit_panel(frame, issue, edit, area);
+        return;
+    }
+
     let content = match issue {
         Some(issue) => format_issue_detail(issue, ready_ids),
         None => vec![Line::from("No issue selected")],
     };
 
     let border_color = if focused { Color::Cyan } else { Color::DarkGray };
-    let title = if focused { " Details (j/k to scroll) " } else { " Details " };
+    let title = if focused { " Details (j/k to scroll, e=edit, i=title) " } else { " Details " };
 
     let paragraph = Paragraph::new(content)
         .block(Block::default()
@@ -365,6 +371,89 @@ fn render_detail_panel(frame: &mut Frame, issue: Option<&Issue>, ready_ids: &std
             .border_style(Style::default().fg(border_color)))
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
+
+    frame.render_widget(paragraph, area);
+}
+
+fn render_edit_panel(frame: &mut Frame, issue: Option<&Issue>, edit: &crate::EditState, area: Rect) {
+    let field_name = match edit.field {
+        crate::EditField::Title => "Title",
+        crate::EditField::Description => "Description",
+    };
+
+    let title = format!(" Editing {} (Esc=cancel, Ctrl+S=save) ", field_name);
+
+    // Create the content lines
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Show the issue ID
+    if let Some(issue) = issue {
+        lines.push(Line::from(vec![
+            Span::styled("ID: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(issue.id.clone()),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    // Show field label
+    lines.push(Line::from(Span::styled(
+        format!("{}:", field_name),
+        Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow),
+    )));
+
+    // Render the editable text with cursor
+    // Split buffer into lines
+    let buffer_lines: Vec<&str> = edit.buffer.split('\n').collect();
+
+    for (line_idx, line_text) in buffer_lines.iter().enumerate() {
+        if line_idx == edit.cursor_line {
+            // This line has the cursor - render with cursor indicator
+            let cursor_col = edit.cursor_col;
+            let chars: Vec<char> = line_text.chars().collect();
+
+            let before_cursor: String = chars[..cursor_col.min(chars.len())].iter().collect();
+            let cursor_char = if cursor_col < chars.len() {
+                chars[cursor_col].to_string()
+            } else {
+                " ".to_string()
+            };
+            let after_cursor: String = if cursor_col < chars.len() {
+                chars[cursor_col + 1..].iter().collect()
+            } else {
+                String::new()
+            };
+
+            lines.push(Line::from(vec![
+                Span::raw(before_cursor),
+                Span::styled(cursor_char, Style::default().bg(Color::White).fg(Color::Black)),
+                Span::raw(after_cursor),
+            ]));
+        } else {
+            lines.push(Line::from(line_text.to_string()));
+        }
+    }
+
+    // Add hint at bottom
+    lines.push(Line::from(""));
+    let hint = if edit.is_modified() {
+        Line::from(Span::styled(
+            "[Modified] Press Ctrl+S to save, Esc to cancel",
+            Style::default().fg(Color::Yellow),
+        ))
+    } else {
+        Line::from(Span::styled(
+            "Press Ctrl+S to save, Esc to cancel",
+            Style::default().fg(Color::DarkGray),
+        ))
+    };
+    lines.push(hint);
+
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)))
+        .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, area);
 }
@@ -521,7 +610,7 @@ fn render_help_overlay(frame: &mut Frame) {
 
     // Center the help box
     let help_width = 50.min(area.width.saturating_sub(4));
-    let help_height = 24.min(area.height.saturating_sub(4));
+    let help_height = 30.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(help_width)) / 2;
     let y = (area.height.saturating_sub(help_height)) / 2;
     let help_area = Rect::new(x, y, help_width, help_height);
@@ -544,7 +633,13 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from("  j / k         Scroll up/down"),
         Line::from("  g / G         Top/bottom"),
         Line::from("  h / ←         Return to tree"),
+        Line::from("  e / i         Edit description / title"),
         Line::from("  Click         Focus panel"),
+        Line::from(""),
+        Line::from(Span::styled("Edit Mode", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from("  Esc           Cancel editing"),
+        Line::from("  Ctrl+S        Save changes"),
+        Line::from("  Tab/Shift+Tab Navigate fields"),
         Line::from(""),
         Line::from(Span::styled("Global", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  c             Toggle show/hide closed"),
@@ -791,7 +886,7 @@ mod tests {
         let ready_ids: HashSet<String> = HashSet::new();
 
         terminal.draw(|frame| {
-            render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0);
+            render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0, None);
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());
@@ -813,7 +908,7 @@ mod tests {
         ready_ids.insert("bsv-456".to_string());
 
         terminal.draw(|frame| {
-            render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0);
+            render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0, None);
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());
@@ -829,7 +924,7 @@ mod tests {
         let ready_ids: HashSet<String> = HashSet::new();
 
         terminal.draw(|frame| {
-            render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0);
+            render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0, None);
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());
@@ -871,7 +966,7 @@ mod tests {
 
     #[test]
     fn test_help_overlay_snapshot() {
-        let backend = TestBackend::new(60, 30);
+        let backend = TestBackend::new(60, 35);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| {
@@ -897,7 +992,7 @@ mod tests {
         let ready_ids: HashSet<String> = HashSet::new();
 
         terminal.draw(|frame| {
-            render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0);
+            render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0, None);
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());
@@ -927,7 +1022,7 @@ mod tests {
             let ready_ids: HashSet<String> = HashSet::new();
 
             terminal.draw(|frame| {
-                render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0);
+                render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0, None);
             }).unwrap();
 
             let output = buffer_to_string(terminal.backend().buffer());
@@ -961,7 +1056,7 @@ mod tests {
         let selected = make_test_issue("bsv-a", "First Issue", "open");
 
         terminal.draw(|frame| {
-            render(frame, &tree, Some(&selected), false, crate::Focus::Tree, 0);
+            render(frame, &tree, Some(&selected), false, crate::Focus::Tree, 0, None);
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());
@@ -975,14 +1070,14 @@ mod tests {
 
     #[test]
     fn test_full_render_with_help() {
-        let backend = TestBackend::new(100, 30);
+        let backend = TestBackend::new(100, 35);
         let mut terminal = Terminal::new(backend).unwrap();
 
         let issues = vec![make_test_issue("bsv-a", "Test", "open")];
         let tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new());
 
         terminal.draw(|frame| {
-            render(frame, &tree, None, true, crate::Focus::Tree, 0); // show_help = true
+            render(frame, &tree, None, true, crate::Focus::Tree, 0, None); // show_help = true
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());

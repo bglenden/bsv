@@ -90,3 +90,33 @@ pub fn get_issue_details(id: &str) -> Result<Option<Issue>> {
 
     Ok(issues.into_iter().next())
 }
+
+/// Update an issue's title
+pub fn update_issue_title(id: &str, title: &str) -> Result<()> {
+    let output = Command::new("bd")
+        .args(["update", id, "--title", title])
+        .output()
+        .context("Failed to run bd update")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("bd update failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
+/// Update an issue's description
+pub fn update_issue_description(id: &str, description: &str) -> Result<()> {
+    let output = Command::new("bd")
+        .args(["update", id, "--description", description])
+        .output()
+        .context("Failed to run bd update")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("bd update failed: {}", stderr);
+    }
+
+    Ok(())
+}
