@@ -24,10 +24,10 @@ Requires [Rust](https://rustup.rs/) and the [bd CLI](https://github.com/steveyeg
 ```bash
 git clone https://github.com/bglenden/bsv.git
 cd bsv
-cargo build --release
+cargo install --path .
 ```
 
-The binary will be at `target/release/bsv`. Copy it to a directory in your PATH.
+This installs `bsv` to `~/.cargo/bin/`, which is typically already in your PATH if you have Rust installed.
 
 ## Usage
 
