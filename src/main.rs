@@ -5,10 +5,16 @@ mod ui;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Focus {
+    Tree,
+    Details,
+}
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::prelude::*;
 use std::io;
@@ -25,6 +31,8 @@ struct App {
     show_help: bool,
     selected_details: Option<bd::Issue>,
     last_selected_id: Option<String>,
+    focus: Focus,
+    detail_scroll: u16,
 }
 
 impl App {
@@ -45,6 +53,8 @@ impl App {
             show_help: false,
             selected_details,
             last_selected_id,
+            focus: Focus::Tree,
+            detail_scroll: 0,
         })
     }
 
@@ -54,16 +64,25 @@ impl App {
             self.selected_details = current_id.as_ref()
                 .and_then(|id| bd::get_issue_details(id).ok().flatten());
             self.last_selected_id = current_id;
+            self.detail_scroll = 0; // Reset scroll when selection changes
         }
     }
 
+    fn scroll_details(&mut self, delta: i16) {
+        let new_scroll = self.detail_scroll as i16 + delta;
+        self.detail_scroll = new_scroll.max(0) as u16;
+    }
+
     fn refresh(&mut self) {
-        // Preserve current selection
+        // Preserve current state
         let selected_id = self.tree.selected_id().map(|s| s.to_string());
+        let show_closed = self.tree.show_closed;
 
         if let Ok(issues) = bd::list_issues() {
             let ready_ids = bd::get_ready_ids().unwrap_or_default();
             self.tree = IssueTree::from_issues(issues, self.tree.expanded.clone(), ready_ids);
+            self.tree.show_closed = show_closed;
+            self.tree.rebuild_visible();
 
             // Restore cursor to previously selected item if it still exists
             if let Some(id) = selected_id {
@@ -79,13 +98,56 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // Handle focus-independent keys first
         match (code, modifiers) {
             // Quit
             (KeyCode::Char('q'), KeyModifiers::NONE) |
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 self.should_quit = true;
+                return;
             }
 
+            // Help
+            (KeyCode::Char('?'), KeyModifiers::NONE) |
+            (KeyCode::Char('?'), KeyModifiers::SHIFT) => {
+                self.show_help = !self.show_help;
+                return;
+            }
+
+            // Escape - close help or return to tree
+            (KeyCode::Esc, KeyModifiers::NONE) => {
+                if self.show_help {
+                    self.show_help = false;
+                } else {
+                    self.focus = Focus::Tree;
+                }
+                return;
+            }
+
+            // Refresh data
+            (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                self.refresh();
+                return;
+            }
+
+            // Toggle show/hide closed (works from either panel)
+            (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                self.tree.toggle_show_closed();
+                return;
+            }
+
+            _ => {}
+        }
+
+        // Handle focus-specific keys
+        match self.focus {
+            Focus::Tree => self.handle_tree_key(code, modifiers),
+            Focus::Details => self.handle_details_key(code, modifiers),
+        }
+    }
+
+    fn handle_tree_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match (code, modifiers) {
             // Movement - vim style
             (KeyCode::Char('j'), KeyModifiers::NONE) |
             (KeyCode::Down, KeyModifiers::NONE) => {
@@ -122,10 +184,14 @@ impl App {
                 self.tree.collapse();
                 let _ = save_expanded(&self.tree.expanded);
             }
-            (KeyCode::Enter, KeyModifiers::NONE) |
             (KeyCode::Char(' '), KeyModifiers::NONE) => {
                 self.tree.toggle_expand();
                 let _ = save_expanded(&self.tree.expanded);
+            }
+
+            // Enter focuses details panel
+            (KeyCode::Enter, KeyModifiers::NONE) => {
+                self.focus = Focus::Details;
             }
 
             // Toggle expand/collapse all
@@ -134,30 +200,67 @@ impl App {
                 let _ = save_expanded(&self.tree.expanded);
             }
 
-            // Toggle show/hide closed
-            (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                self.tree.toggle_show_closed();
+            _ => {}
+        }
+    }
+
+    fn handle_details_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match (code, modifiers) {
+            // Scroll details
+            (KeyCode::Char('j'), KeyModifiers::NONE) |
+            (KeyCode::Down, KeyModifiers::NONE) => {
+                self.scroll_details(1);
+            }
+            (KeyCode::Char('k'), KeyModifiers::NONE) |
+            (KeyCode::Up, KeyModifiers::NONE) => {
+                self.scroll_details(-1);
             }
 
-            // Refresh data
-            (KeyCode::Char('r'), KeyModifiers::NONE) => {
-                self.refresh();
+            // Page up/down
+            (KeyCode::PageDown, KeyModifiers::NONE) |
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                self.scroll_details(10);
+            }
+            (KeyCode::PageUp, KeyModifiers::NONE) |
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                self.scroll_details(-10);
             }
 
-            // Help
-            (KeyCode::Char('?'), KeyModifiers::NONE) |
-            (KeyCode::Char('?'), KeyModifiers::SHIFT) => {
-                self.show_help = !self.show_help;
+            // Top/Bottom
+            (KeyCode::Char('g'), KeyModifiers::NONE) |
+            (KeyCode::Home, KeyModifiers::NONE) => {
+                self.detail_scroll = 0;
+            }
+            (KeyCode::Char('G'), KeyModifiers::SHIFT) |
+            (KeyCode::Char('G'), KeyModifiers::NONE) |
+            (KeyCode::End, KeyModifiers::NONE) => {
+                self.detail_scroll = u16::MAX; // Will be clamped in render
             }
 
-            // Escape closes help if open
-            (KeyCode::Esc, KeyModifiers::NONE) => {
-                if self.show_help {
-                    self.show_help = false;
-                }
+            // h or left returns to tree
+            (KeyCode::Char('h'), KeyModifiers::NONE) |
+            (KeyCode::Left, KeyModifiers::NONE) => {
+                self.focus = Focus::Tree;
             }
 
             _ => {}
+        }
+    }
+
+    fn handle_mouse(&mut self, column: u16, row: u16, screen_width: u16, screen_height: u16) {
+        // Roughly split at 40% for tree panel
+        let tree_width = screen_width * 40 / 100;
+        if column < tree_width {
+            self.focus = Focus::Tree;
+            // Click on an issue to select it (account for border)
+            if row > 0 && row < screen_height - 1 {
+                let clicked_index = (row - 1) as usize;
+                if clicked_index < self.tree.visible_items.len() {
+                    self.tree.cursor = clicked_index;
+                }
+            }
+        } else {
+            self.focus = Focus::Details;
         }
     }
 }
@@ -172,18 +275,26 @@ fn print_help() {
     println!("    --help     Print this help message");
     println!("    --debug    Dump tree structure and exit");
     println!();
-    println!("KEYBINDINGS:");
+    println!("TREE PANEL:");
     println!("    j/↓        Move cursor down");
     println!("    k/↑        Move cursor up");
     println!("    g/Home     Go to top");
     println!("    G/End      Go to bottom");
-    println!("    l/→/Enter  Expand node");
+    println!("    l/→/Enter  Expand node / focus details");
     println!("    h/←        Collapse node (or go to parent)");
     println!("    Space      Toggle expand/collapse");
     println!("    Tab        Toggle expand/collapse all");
+    println!();
+    println!("DETAILS PANEL:");
+    println!("    j/k        Scroll up/down");
+    println!("    g/G        Go to top/bottom");
+    println!("    h/←        Return to tree");
+    println!("    Click      Focus panel");
+    println!();
+    println!("GLOBAL:");
     println!("    c          Toggle show/hide closed");
     println!("    r          Refresh data from bd");
-    println!("    ?          Show this help");
+    println!("    ?          Show help overlay");
     println!("    q/Ctrl+C   Quit");
     println!();
     println!("COLORS:");
@@ -247,7 +358,7 @@ fn main() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -258,8 +369,9 @@ fn main() -> Result<()> {
 
     // Main loop
     loop {
+        let size = terminal.size()?;
         terminal.draw(|frame| {
-            ui::render(frame, &app.tree, app.selected_details.as_ref(), app.show_help);
+            ui::render(frame, &app.tree, app.selected_details.as_ref(), app.show_help, app.focus, app.detail_scroll);
         })?;
 
         // Check for file changes (non-blocking) with debounce
@@ -274,11 +386,33 @@ fn main() -> Result<()> {
             }
         }
 
-        // Poll for key events with timeout
+        // Poll for events with timeout
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                app.handle_key(key.code, key.modifiers);
-                app.update_selected_details();
+            match event::read()? {
+                Event::Key(key) => {
+                    app.handle_key(key.code, key.modifiers);
+                    app.update_selected_details();
+                }
+                Event::Mouse(mouse) => {
+                    match mouse.kind {
+                        MouseEventKind::Down(_) | MouseEventKind::Up(MouseButton::Left) => {
+                            app.handle_mouse(mouse.column, mouse.row, size.width, size.height);
+                            app.update_selected_details();
+                        }
+                        MouseEventKind::ScrollDown => {
+                            if app.focus == Focus::Details {
+                                app.scroll_details(3);
+                            }
+                        }
+                        MouseEventKind::ScrollUp => {
+                            if app.focus == Focus::Details {
+                                app.scroll_details(-3);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -289,7 +423,7 @@ fn main() -> Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
 
     Ok(())
 }

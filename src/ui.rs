@@ -10,13 +10,60 @@ use ratatui::{
 
 /// Convert markdown text to styled Lines
 fn markdown_to_lines(text: &str) -> Vec<Line<'static>> {
-    text.lines()
-        .map(|line| markdown_line_to_spans(line))
-        .collect()
+    let mut lines_out = Vec::new();
+    let mut in_code_block = false;
+    let mut code_block_lang = String::new();
+
+    for line in text.lines() {
+        // Check for code block fence
+        if line.starts_with("```") {
+            if in_code_block {
+                // End of code block
+                in_code_block = false;
+                code_block_lang.clear();
+            } else {
+                // Start of code block
+                in_code_block = true;
+                code_block_lang = line[3..].trim().to_string();
+                // Show language tag if present
+                if !code_block_lang.is_empty() {
+                    lines_out.push(Line::from(Span::styled(
+                        format!("── {} ──", code_block_lang),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+            continue;
+        }
+
+        if in_code_block {
+            // Code block content - show in green with slight indent
+            lines_out.push(Line::from(Span::styled(
+                format!("  {}", line),
+                Style::default().fg(Color::Green),
+            )));
+        } else {
+            lines_out.push(markdown_line_to_spans(line));
+        }
+    }
+
+    lines_out
 }
 
 /// Convert a single line of markdown to styled Spans
 fn markdown_line_to_spans(line: &str) -> Line<'static> {
+    // Handle horizontal rules (---, ***, ___)
+    let trimmed = line.trim();
+    if (trimmed.chars().all(|c| c == '-') && trimmed.len() >= 3)
+        || (trimmed.chars().all(|c| c == '*') && trimmed.len() >= 3)
+        || (trimmed.chars().all(|c| c == '_') && trimmed.len() >= 3)
+    {
+        return Line::from(Span::styled(
+            "────────────────────────────────────────",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
     // Handle headers
     if line.starts_with("### ") {
         return Line::from(Span::styled(
@@ -37,11 +84,55 @@ fn markdown_line_to_spans(line: &str) -> Line<'static> {
         ));
     }
 
+    // Handle blockquotes
+    if line.starts_with("> ") {
+        return Line::from(vec![
+            Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                line[2..].to_string(),
+                Style::default().fg(Color::White).add_modifier(Modifier::ITALIC),
+            ),
+        ]);
+    }
+    if line.starts_with(">") && line.len() == 1 {
+        return Line::from(Span::styled("│", Style::default().fg(Color::DarkGray)));
+    }
+
+    // Handle table rows (lines starting with |)
+    if line.starts_with('|') {
+        // Check if it's a separator row (|---|---|)
+        if line.contains("---") || line.contains(":-") || line.contains("-:") {
+            return Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        // Regular table row - highlight pipes
+        let mut spans = Vec::new();
+        for part in line.split('|') {
+            if !spans.is_empty() {
+                spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+            }
+            spans.push(Span::raw(part.to_string()));
+        }
+        return Line::from(spans);
+    }
+
     // Handle list items (just pass through with slight styling)
     if line.starts_with("- ") || line.starts_with("* ") {
         let rest = &line[2..];
         return Line::from(vec![
             Span::styled("• ", Style::default().fg(Color::Cyan)),
+            Span::raw(parse_inline_markdown(rest)),
+        ]);
+    }
+
+    // Handle indented list items
+    if line.starts_with("  - ") || line.starts_with("  * ") {
+        let rest = &line[4..];
+        return Line::from(vec![
+            Span::raw("  "),
+            Span::styled("◦ ", Style::default().fg(Color::Cyan)),
             Span::raw(parse_inline_markdown(rest)),
         ]);
     }
@@ -182,24 +273,25 @@ fn parse_inline_markdown(text: &str) -> String {
     text.to_string()
 }
 
-pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Issue>, show_help: bool) {
+pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Issue>, show_help: bool, focus: crate::Focus, detail_scroll: u16) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(frame.area());
 
-    render_tree_panel(frame, tree, chunks[0]);
+    let tree_focused = focus == crate::Focus::Tree;
+    render_tree_panel(frame, tree, chunks[0], tree_focused);
 
     // Use full details if available (has dependencies), otherwise fall back to tree node
     let issue_for_details = selected_details.or_else(|| tree.selected_node().map(|n| &n.issue));
-    render_detail_panel(frame, issue_for_details, &tree.ready_ids, chunks[1]);
+    render_detail_panel(frame, issue_for_details, &tree.ready_ids, chunks[1], !tree_focused, detail_scroll);
 
     if show_help {
         render_help_overlay(frame);
     }
 }
 
-fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect) {
+fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: bool) {
     let items: Vec<ListItem> = tree.visible_items
         .iter()
         .enumerate()
@@ -245,27 +337,32 @@ fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect) {
         })
         .collect();
 
+    let border_color = if focused { Color::Cyan } else { Color::DarkGray };
     let list = List::new(items)
         .block(Block::default()
             .title(" Issues ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)));
+            .border_style(Style::default().fg(border_color)));
 
     frame.render_widget(list, area);
 }
 
-fn render_detail_panel(frame: &mut Frame, issue: Option<&Issue>, ready_ids: &std::collections::HashSet<String>, area: Rect) {
+fn render_detail_panel(frame: &mut Frame, issue: Option<&Issue>, ready_ids: &std::collections::HashSet<String>, area: Rect, focused: bool, scroll: u16) {
     let content = match issue {
         Some(issue) => format_issue_detail(issue, ready_ids),
         None => vec![Line::from("No issue selected")],
     };
 
+    let border_color = if focused { Color::Cyan } else { Color::DarkGray };
+    let title = if focused { " Details (j/k to scroll) " } else { " Details " };
+
     let paragraph = Paragraph::new(content)
         .block(Block::default()
-            .title(" Details ")
+            .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)))
-        .wrap(Wrap { trim: false });
+            .border_style(Style::default().fg(border_color)))
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
 
     frame.render_widget(paragraph, area);
 }
@@ -422,7 +519,7 @@ fn render_help_overlay(frame: &mut Frame) {
 
     // Center the help box
     let help_width = 50.min(area.width.saturating_sub(4));
-    let help_height = 20.min(area.height.saturating_sub(4));
+    let help_height = 24.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(help_width)) / 2;
     let y = (area.height.saturating_sub(help_height)) / 2;
     let help_area = Rect::new(x, y, help_width, help_height);
@@ -431,29 +528,36 @@ fn render_help_overlay(frame: &mut Frame) {
     frame.render_widget(Clear, help_area);
 
     let help_text = vec![
-        Line::from(Span::styled("Keybindings", Style::default().add_modifier(Modifier::BOLD))),
-        Line::from(""),
+        Line::from(Span::styled("Tree Panel", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  j / ↓         Move down"),
         Line::from("  k / ↑         Move up"),
         Line::from("  g / Home      Go to top"),
         Line::from("  G / End       Go to bottom"),
-        Line::from("  l / → / Enter Expand"),
+        Line::from("  l / → / Enter Expand / focus details"),
         Line::from("  h / ←         Collapse / go to parent"),
         Line::from("  Space         Toggle expand/collapse"),
         Line::from("  Tab           Toggle expand/collapse all"),
+        Line::from(""),
+        Line::from(Span::styled("Details Panel", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from("  j / k         Scroll up/down"),
+        Line::from("  g / G         Top/bottom"),
+        Line::from("  h / ←         Return to tree"),
+        Line::from("  Click         Focus panel"),
+        Line::from(""),
+        Line::from(Span::styled("Global", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  c             Toggle show/hide closed"),
         Line::from("  r             Refresh data"),
         Line::from("  ?             Toggle this help"),
         Line::from("  q / Ctrl+C    Quit"),
         Line::from(""),
-        Line::from(Span::styled("Colors", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("Colors: ", Style::default().add_modifier(Modifier::BOLD))),
         Line::from(vec![
             Span::styled("  Green", Style::default().fg(Color::Green)),
-            Span::raw(" = Ready  "),
+            Span::raw("=Ready "),
             Span::styled("Red", Style::default().fg(Color::Red)),
-            Span::raw(" = Blocked  "),
+            Span::raw("=Blocked "),
             Span::styled("Gray", Style::default().fg(Color::DarkGray)),
-            Span::raw(" = Closed"),
+            Span::raw("=Closed"),
         ]),
     ];
 
@@ -465,4 +569,424 @@ fn render_help_overlay(frame: &mut Frame) {
         .style(Style::default().bg(Color::Black));
 
     frame.render_widget(help_paragraph, help_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal, buffer::Buffer};
+    use std::collections::HashSet;
+
+    /// Convert buffer to a string for snapshot comparison
+    fn buffer_to_string(buffer: &Buffer) -> String {
+        let mut output = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                output.push_str(buffer[(x, y)].symbol());
+            }
+            // Trim trailing whitespace from each line
+            output = output.trim_end().to_string();
+            output.push('\n');
+        }
+        output
+    }
+
+    // ==================== Markdown Parsing Tests ====================
+
+    #[test]
+    fn test_markdown_header_h1() {
+        let lines = markdown_to_lines("# Header One");
+        assert_eq!(lines.len(), 1);
+        // Check the text content
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "Header One");
+    }
+
+    #[test]
+    fn test_markdown_header_h2() {
+        let lines = markdown_to_lines("## Header Two");
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "Header Two");
+    }
+
+    #[test]
+    fn test_markdown_header_h3() {
+        let lines = markdown_to_lines("### Header Three");
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "Header Three");
+    }
+
+    #[test]
+    fn test_markdown_code_block() {
+        let input = "```rust\nlet x = 1;\n```";
+        let lines = markdown_to_lines(input);
+        // Should have: language tag line + code line
+        assert_eq!(lines.len(), 2);
+        let lang_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(lang_text.contains("rust"));
+        let code_text: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(code_text.contains("let x = 1;"));
+    }
+
+    #[test]
+    fn test_markdown_code_block_no_language() {
+        let input = "```\ncode here\n```";
+        let lines = markdown_to_lines(input);
+        // No language tag, just the code
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("code here"));
+    }
+
+    #[test]
+    fn test_markdown_blockquote() {
+        let lines = markdown_to_lines("> This is a quote");
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("This is a quote"));
+        assert!(text.contains("│")); // Quote marker
+    }
+
+    #[test]
+    fn test_markdown_unordered_list() {
+        let lines = markdown_to_lines("- Item one\n- Item two");
+        assert_eq!(lines.len(), 2);
+        let text1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let text2: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text1.contains("•") && text1.contains("Item one"));
+        assert!(text2.contains("•") && text2.contains("Item two"));
+    }
+
+    #[test]
+    fn test_markdown_ordered_list() {
+        let lines = markdown_to_lines("1. First\n2. Second");
+        assert_eq!(lines.len(), 2);
+        let text1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let text2: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text1.contains("1.") && text1.contains("First"));
+        assert!(text2.contains("2.") && text2.contains("Second"));
+    }
+
+    #[test]
+    fn test_markdown_horizontal_rule() {
+        for rule in ["---", "***", "___"] {
+            let lines = markdown_to_lines(rule);
+            assert_eq!(lines.len(), 1);
+            let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains("────")); // Should render as line
+        }
+    }
+
+    #[test]
+    fn test_markdown_table() {
+        let input = "| Col1 | Col2 |\n|------|------|\n| A    | B    |";
+        let lines = markdown_to_lines(input);
+        assert_eq!(lines.len(), 3);
+        // Table rows should contain the pipe character (rendered as │)
+        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(header.contains("Col1") && header.contains("Col2"));
+    }
+
+    #[test]
+    fn test_markdown_inline_code() {
+        let lines = markdown_to_lines("Use `code` here");
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("code"));
+    }
+
+    #[test]
+    fn test_markdown_bold() {
+        let lines = markdown_to_lines("This is **bold** text");
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "This is bold text");
+    }
+
+    #[test]
+    fn test_markdown_italic() {
+        let lines = markdown_to_lines("This is *italic* text");
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "This is italic text");
+    }
+
+    #[test]
+    fn test_markdown_link() {
+        let lines = markdown_to_lines("Click [here](https://example.com)");
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("here"));
+        // URL should not appear in rendered text
+        assert!(!text.contains("https://"));
+    }
+
+    // ==================== Snapshot Tests ====================
+
+    fn make_test_issue(id: &str, title: &str, status: &str) -> Issue {
+        Issue {
+            id: id.to_string(),
+            title: title.to_string(),
+            description: Some("Test description".to_string()),
+            status: status.to_string(),
+            priority: 2,
+            issue_type: "task".to_string(),
+            created_at: "2024-01-01".to_string(),
+            created_by: None,
+            updated_at: "2024-01-01".to_string(),
+            labels: None,
+            parent: None,
+            dependencies: None,
+            dependents: None,
+            notes: None,
+            design: None,
+            acceptance_criteria: None,
+        }
+    }
+
+    fn make_rich_test_issue() -> Issue {
+        use crate::bd::Dependency;
+        Issue {
+            id: "bsv-rich".to_string(),
+            title: "Rich Test Issue".to_string(),
+            description: Some("# Header\n\nWith **bold** and `code`".to_string()),
+            status: "open".to_string(),
+            priority: 1, // Yellow priority
+            issue_type: "feature".to_string(),
+            created_at: "2024-01-01".to_string(),
+            created_by: Some("tester".to_string()),
+            updated_at: "2024-01-02".to_string(),
+            labels: Some(vec!["bug".to_string(), "urgent".to_string()]),
+            parent: Some("bsv-parent".to_string()),
+            dependencies: Some(vec![
+                Dependency {
+                    id: "bsv-dep1".to_string(),
+                    title: "Blocking Issue".to_string(),
+                    dependency_type: Some("blocks".to_string()),
+                },
+            ]),
+            dependents: Some(vec![
+                Dependency {
+                    id: "bsv-child1".to_string(),
+                    title: "Child Issue".to_string(),
+                    dependency_type: None,
+                },
+            ]),
+            notes: Some("- Item one\n  - Nested item\n- Item two".to_string()),
+            design: None,
+            acceptance_criteria: None,
+        }
+    }
+
+    #[test]
+    fn test_detail_panel_snapshot() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let issue = make_test_issue("bsv-123", "Test Issue Title", "open");
+        let ready_ids: HashSet<String> = HashSet::new();
+
+        terminal.draw(|frame| {
+            render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0);
+        }).unwrap();
+
+        let output = buffer_to_string(terminal.backend().buffer());
+
+        // Verify key elements are present
+        assert!(output.contains("Details"));
+        assert!(output.contains("Test Issue Title"));
+        assert!(output.contains("bsv-123"));
+        assert!(output.contains("BLOCKED")); // Not in ready_ids
+    }
+
+    #[test]
+    fn test_detail_panel_ready_issue() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let issue = make_test_issue("bsv-456", "Ready Issue", "open");
+        let mut ready_ids: HashSet<String> = HashSet::new();
+        ready_ids.insert("bsv-456".to_string());
+
+        terminal.draw(|frame| {
+            render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0);
+        }).unwrap();
+
+        let output = buffer_to_string(terminal.backend().buffer());
+        assert!(output.contains("READY"));
+    }
+
+    #[test]
+    fn test_detail_panel_closed_issue() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let issue = make_test_issue("bsv-789", "Closed Issue", "closed");
+        let ready_ids: HashSet<String> = HashSet::new();
+
+        terminal.draw(|frame| {
+            render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0);
+        }).unwrap();
+
+        let output = buffer_to_string(terminal.backend().buffer());
+        // Closed issues should not show READY or BLOCKED
+        assert!(!output.contains("READY"));
+        assert!(!output.contains("BLOCKED"));
+    }
+
+    #[test]
+    fn test_tree_panel_snapshot() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let issues = vec![
+            make_test_issue("bsv-a", "First Issue", "open"),
+            make_test_issue("bsv-b", "Second Issue", "open"),
+            make_test_issue("bsv-a.1", "Child Issue", "open"),
+        ];
+
+        let mut expanded = HashSet::new();
+        expanded.insert("bsv-a".to_string());
+        let ready_ids = HashSet::new();
+
+        let tree = IssueTree::from_issues(issues, expanded, ready_ids);
+
+        terminal.draw(|frame| {
+            render_tree_panel(frame, &tree, frame.area(), true);
+        }).unwrap();
+
+        let output = buffer_to_string(terminal.backend().buffer());
+
+        // Verify structure
+        assert!(output.contains("Issues"));
+        assert!(output.contains("bsv-a"));
+        assert!(output.contains("First Issue"));
+        assert!(output.contains("bsv-a.1")); // Child should be visible when expanded
+        assert!(output.contains("Child Issue"));
+    }
+
+    #[test]
+    fn test_help_overlay_snapshot() {
+        let backend = TestBackend::new(60, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| {
+            render_help_overlay(frame);
+        }).unwrap();
+
+        let output = buffer_to_string(terminal.backend().buffer());
+
+        // Verify help content
+        assert!(output.contains("Tree Panel"));
+        assert!(output.contains("Details Panel"));
+        assert!(output.contains("Global"));
+        assert!(output.contains("j / k"));
+        assert!(output.contains("Quit"));
+    }
+
+    #[test]
+    fn test_detail_panel_rich_issue() {
+        let backend = TestBackend::new(70, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let issue = make_rich_test_issue();
+        let ready_ids: HashSet<String> = HashSet::new();
+
+        terminal.draw(|frame| {
+            render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0);
+        }).unwrap();
+
+        let output = buffer_to_string(terminal.backend().buffer());
+
+        // Verify rich content is rendered
+        assert!(output.contains("Rich Test Issue"));
+        assert!(output.contains("bsv-rich"));
+        assert!(output.contains("BLOCKED")); // Has dependencies
+        assert!(output.contains("bsv-dep1")); // Blocker ID shown
+        assert!(output.contains("Labels:"));
+        assert!(output.contains("bug"));
+        assert!(output.contains("Notes:"));
+        assert!(output.contains("Dependencies:"));
+        assert!(output.contains("Children:"));
+        assert!(output.contains("bsv-child1"));
+    }
+
+    #[test]
+    fn test_detail_panel_priorities() {
+        // Test different priority colors are rendered
+        for priority in [0, 1, 2, 3, 4] {
+            let backend = TestBackend::new(60, 15);
+            let mut terminal = Terminal::new(backend).unwrap();
+
+            let mut issue = make_test_issue("bsv-p", "Priority Test", "closed");
+            issue.priority = priority;
+            let ready_ids: HashSet<String> = HashSet::new();
+
+            terminal.draw(|frame| {
+                render_detail_panel(frame, Some(&issue), &ready_ids, frame.area(), true, 0);
+            }).unwrap();
+
+            let output = buffer_to_string(terminal.backend().buffer());
+            assert!(output.contains(&format!("P{}", priority)));
+        }
+    }
+
+    #[test]
+    fn test_markdown_nested_list() {
+        let lines = markdown_to_lines("- Top level\n  - Nested item\n- Another top");
+        assert_eq!(lines.len(), 3);
+        let nested: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(nested.contains("◦")); // Nested bullet
+        assert!(nested.contains("Nested item"));
+    }
+
+    #[test]
+    fn test_full_render_function() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let issues = vec![
+            make_test_issue("bsv-a", "First Issue", "open"),
+            make_test_issue("bsv-b", "Second Issue", "open"),
+        ];
+        let expanded = HashSet::new();
+        let mut ready_ids = HashSet::new();
+        ready_ids.insert("bsv-a".to_string());
+
+        let tree = IssueTree::from_issues(issues, expanded, ready_ids);
+        let selected = make_test_issue("bsv-a", "First Issue", "open");
+
+        terminal.draw(|frame| {
+            render(frame, &tree, Some(&selected), false, crate::Focus::Tree, 0);
+        }).unwrap();
+
+        let output = buffer_to_string(terminal.backend().buffer());
+
+        // Verify both panels rendered
+        assert!(output.contains("Issues")); // Tree panel title
+        assert!(output.contains("Details")); // Detail panel title
+        assert!(output.contains("bsv-a"));
+        assert!(output.contains("First Issue"));
+    }
+
+    #[test]
+    fn test_full_render_with_help() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let issues = vec![make_test_issue("bsv-a", "Test", "open")];
+        let tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new());
+
+        terminal.draw(|frame| {
+            render(frame, &tree, None, true, crate::Focus::Tree, 0); // show_help = true
+        }).unwrap();
+
+        let output = buffer_to_string(terminal.backend().buffer());
+
+        // Help overlay should be visible
+        assert!(output.contains("Help"));
+        assert!(output.contains("Quit"));
+    }
 }

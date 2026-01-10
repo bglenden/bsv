@@ -2,6 +2,11 @@
 name = "bsv"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "A terminal UI for viewing Beads issues"
+repository = "https://github.com/yourusername/bsv"
+keywords = ["tui", "beads", "issues", "terminal"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 ratatui = "0.29"
