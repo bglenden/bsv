@@ -212,6 +212,7 @@ impl IssueTree {
         eprintln!("=== Tree Debug Dump ===");
         eprintln!("Root IDs: {:?}", self.root_ids);
         eprintln!("Expanded: {:?}", self.expanded);
+        eprintln!("Ready IDs: {:?}", self.ready_ids);
         eprintln!("\nAll nodes:");
         for (id, node) in &self.nodes {
             eprintln!("  {} -> children: {:?}, depth: {}", id, node.children, node.depth);
@@ -221,7 +222,14 @@ impl IssueTree {
             let marker = if i == self.cursor { ">" } else { " " };
             if let Some(node) = self.nodes.get(id) {
                 let indent = "  ".repeat(node.depth);
-                eprintln!("{} {}{} - {}", marker, indent, id, node.issue.title);
+                let status = if node.issue.status == "closed" {
+                    "[CLOSED]"
+                } else if self.ready_ids.contains(id) {
+                    "[READY]"
+                } else {
+                    "[BLOCKED]"
+                };
+                eprintln!("{} {}{} - {} {}", marker, indent, id, node.issue.title, status);
             }
         }
         eprintln!("=== End Dump ===");
