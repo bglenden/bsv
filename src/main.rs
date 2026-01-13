@@ -738,7 +738,6 @@ fn print_help() {
     println!("    h/←        Return to tree");
     println!("    e          Edit description");
     println!("    i          Edit title");
-    println!("    Click      Focus panel");
     println!();
     println!("EDIT MODE:");
     println!("    Esc        Cancel editing");
