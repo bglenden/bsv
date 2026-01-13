@@ -754,6 +754,11 @@ fn print_help() {
     println!("    ?          Show help overlay");
     println!("    q/Ctrl+C   Quit");
     println!();
+    println!("MOUSE:");
+    println!("    Click      Select issue / focus panel");
+    println!("    Scroll     Scroll details panel");
+    println!("    Drag       Drag divider to resize panels");
+    println!();
     println!("COLORS:");
     println!("    Green      Ready (no blockers)");
     println!("    Red        Blocked");
