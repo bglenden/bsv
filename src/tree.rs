@@ -181,22 +181,26 @@ impl IssueTree {
     }
 
     fn add_visible_recursive_id(&mut self, id: &str, depth: usize) {
-        // Skip closed issues if show_closed is false
-        if !self.show_closed {
-            if let Some(node) = self.nodes.get(id) {
-                if node.issue.status == "closed" {
-                    return;
-                }
+        // Check if this issue is closed
+        let is_closed = self.nodes.get(id)
+            .map(|node| node.issue.status == "closed")
+            .unwrap_or(false);
+
+        // Only add to visible if showing closed OR issue is not closed
+        if self.show_closed || !is_closed {
+            self.visible_items.push(id.to_string());
+
+            if let Some(node) = self.nodes.get_mut(id) {
+                node.depth = depth;
             }
         }
 
-        self.visible_items.push(id.to_string());
+        // Traverse children if:
+        // 1. This node is expanded, OR
+        // 2. This node is closed and hidden (so open children can still appear)
+        let should_traverse = self.expanded.contains(id) || (!self.show_closed && is_closed);
 
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.depth = depth;
-        }
-
-        if self.expanded.contains(id) {
+        if should_traverse {
             if let Some(node) = self.nodes.get(id).cloned() {
                 let mut children = node.children.clone();
                 // Sort children by priority then title
@@ -211,37 +215,44 @@ impl IssueTree {
                         _ => std::cmp::Ordering::Equal,
                     }
                 });
+                // If current node is hidden (closed), children appear at same depth
+                // Otherwise, children are indented
+                let child_depth = if !self.show_closed && is_closed { depth } else { depth + 1 };
                 for child_id in children {
-                    self.add_visible_recursive_id(&child_id, depth + 1);
+                    self.add_visible_recursive_id(&child_id, child_depth);
                 }
             }
         }
     }
 
     fn add_visible_recursive_dep(&mut self, id: &str, depth: usize, visited: &mut HashSet<String>) {
-        // Skip closed issues if show_closed is false
-        if !self.show_closed {
-            if let Some(node) = self.nodes.get(id) {
-                if node.issue.status == "closed" {
-                    return;
-                }
-            }
-        }
+        // Check if this issue is closed
+        let is_closed = self.nodes.get(id)
+            .map(|node| node.issue.status == "closed")
+            .unwrap_or(false);
 
-        // Cycle detection: if already fully visited, skip entirely
+        // Cycle detection: if already in current path, skip to prevent infinite loops
         // But we DO want to show multi-parent items multiple times
         // So we only track "in current path" for cycle detection
         if visited.contains(id) {
             return; // Already in current traversal path - cycle detected
         }
 
-        self.visible_items.push(id.to_string());
+        // Only add to visible if showing closed OR issue is not closed
+        if self.show_closed || !is_closed {
+            self.visible_items.push(id.to_string());
 
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.depth = depth;
+            if let Some(node) = self.nodes.get_mut(id) {
+                node.depth = depth;
+            }
         }
 
-        if self.dep_expanded.contains(id) {
+        // Traverse children if:
+        // 1. This node is expanded, OR
+        // 2. This node is closed and hidden (so open children can still appear)
+        let should_traverse = self.dep_expanded.contains(id) || (!self.show_closed && is_closed);
+
+        if should_traverse {
             if let Some(node) = self.nodes.get(id).cloned() {
                 let mut children = node.dep_children.clone();
                 // Sort children by priority then title
@@ -257,8 +268,11 @@ impl IssueTree {
                     }
                 });
                 visited.insert(id.to_string()); // Mark as in-path
+                // If current node is hidden (closed), children appear at same depth
+                // Otherwise, children are indented
+                let child_depth = if !self.show_closed && is_closed { depth } else { depth + 1 };
                 for child_id in children {
-                    self.add_visible_recursive_dep(&child_id, depth + 1, visited);
+                    self.add_visible_recursive_dep(&child_id, child_depth, visited);
                 }
                 visited.remove(id); // Remove from path when backtracking
             }
@@ -906,5 +920,132 @@ mod tests {
 
         // Note: depth is recalculated during rebuild_visible based on traversal
         // The node.depth in the visible traversal should reflect the tree depth
+    }
+
+    // === Tests for show_closed behavior ===
+
+    fn make_closed_issue(id: &str, title: &str, priority: i32) -> Issue {
+        Issue {
+            id: id.to_string(),
+            title: title.to_string(),
+            description: None,
+            status: "closed".to_string(),
+            priority,
+            issue_type: "task".to_string(),
+            created_at: "2024-01-01".to_string(),
+            created_by: None,
+            updated_at: "2024-01-01".to_string(),
+            labels: None,
+            parent: None,
+            dependencies: None,
+            dependents: None,
+            notes: None,
+            design: None,
+            acceptance_criteria: None,
+        }
+    }
+
+    #[test]
+    fn test_open_child_of_closed_parent_visible_in_id_mode() {
+        // Open children of closed parents should still be visible when closed hidden
+        let issues = vec![
+            make_closed_issue("parent", "Closed Parent", 1),
+            make_issue("parent.1", "Open Child", 2),
+        ];
+
+        let mut expanded = HashSet::new();
+        expanded.insert("parent".to_string());
+
+        let mut tree = IssueTree::from_issues(
+            issues,
+            expanded,
+            HashSet::new(),
+            HashSet::new(),
+            HierarchyMode::IdBased
+        );
+
+        // With show_closed = true, both should be visible
+        assert_eq!(tree.visible_items.len(), 2);
+        assert!(tree.visible_items.contains(&"parent".to_string()));
+        assert!(tree.visible_items.contains(&"parent.1".to_string()));
+
+        // Toggle show_closed to false
+        tree.toggle_show_closed();
+
+        // Now only the open child should be visible
+        assert_eq!(tree.visible_items.len(), 1);
+        assert!(!tree.visible_items.contains(&"parent".to_string()));
+        assert!(tree.visible_items.contains(&"parent.1".to_string()));
+
+        // The open child should appear at depth 0 (since parent is hidden)
+        assert_eq!(tree.nodes.get("parent.1").unwrap().depth, 0);
+    }
+
+    #[test]
+    fn test_open_grandchild_of_closed_hierarchy() {
+        // Open grandchildren should be visible even when ancestors are closed
+        let issues = vec![
+            make_closed_issue("root", "Closed Root", 1),
+            make_closed_issue("root.1", "Closed Child", 1),
+            make_issue("root.1.1", "Open Grandchild", 2),
+        ];
+
+        let mut expanded = HashSet::new();
+        expanded.insert("root".to_string());
+        expanded.insert("root.1".to_string());
+
+        let mut tree = IssueTree::from_issues(
+            issues,
+            expanded,
+            HashSet::new(),
+            HashSet::new(),
+            HierarchyMode::IdBased
+        );
+
+        // Toggle show_closed to false
+        tree.toggle_show_closed();
+
+        // Only the open grandchild should be visible
+        assert_eq!(tree.visible_items.len(), 1);
+        assert!(tree.visible_items.contains(&"root.1.1".to_string()));
+
+        // The grandchild should appear at depth 0 (since all ancestors are hidden)
+        assert_eq!(tree.nodes.get("root.1.1").unwrap().depth, 0);
+    }
+
+    #[test]
+    fn test_open_child_of_closed_parent_in_dep_mode() {
+        // In dep mode, open children of closed issues should still be visible
+        let mut closed_issue = make_issue_with_deps("blocker", "Closed Blocker", vec![]);
+        closed_issue.status = "closed".to_string();
+
+        let issues = vec![
+            closed_issue,
+            make_issue_with_deps("blocked", "Open Blocked", vec!["blocker"]),
+        ];
+
+        let mut dep_expanded = HashSet::new();
+        dep_expanded.insert("blocker".to_string());
+
+        let mut tree = IssueTree::from_issues(
+            issues,
+            HashSet::new(),
+            dep_expanded,
+            HashSet::new(),
+            HierarchyMode::DependencyBased
+        );
+
+        // With show_closed = true, both should be visible
+        assert_eq!(tree.visible_items.len(), 2);
+
+        // Toggle show_closed to false
+        tree.toggle_show_closed();
+
+        // Only the open issue should be visible
+        assert_eq!(tree.visible_items.len(), 1);
+        assert!(tree.visible_items.contains(&"blocked".to_string()));
+
+        // It should appear at depth 0 (since its only parent is hidden)
+        assert_eq!(tree.nodes.get("blocked").unwrap().depth, 0);
     }
 }
