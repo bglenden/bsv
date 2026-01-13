@@ -17,6 +17,8 @@ pub struct ProjectState {
     pub dep_expanded: HashSet<String>,
     #[serde(default)]
     pub hierarchy_mode: Option<HierarchyMode>,
+    #[serde(default)]
+    pub panel_ratio: Option<f32>,
 }
 
 fn state_file_path() -> Option<PathBuf> {
@@ -96,6 +98,7 @@ pub fn save_expanded(expanded: &HashSet<String>) -> Result<()> {
         expanded: expanded.clone(),
         dep_expanded: existing.dep_expanded,
         hierarchy_mode: existing.hierarchy_mode,
+        panel_ratio: existing.panel_ratio,
     });
     save_state(&state)
 }
@@ -108,10 +111,37 @@ pub fn save_tree_state(
 ) -> Result<()> {
     let mut state = load_state();
     let key = get_project_key();
+    let existing = state.projects.get(&key).cloned().unwrap_or_default();
     state.projects.insert(key, ProjectState {
         expanded: expanded.clone(),
         dep_expanded: dep_expanded.clone(),
         hierarchy_mode: Some(hierarchy_mode),
+        panel_ratio: existing.panel_ratio,
+    });
+    save_state(&state)
+}
+
+const DEFAULT_PANEL_RATIO: f32 = 0.4;
+
+/// Load panel ratio (defaults to 0.4 = 40% left panel)
+pub fn load_panel_ratio() -> f32 {
+    let state = load_state();
+    let key = get_project_key();
+    state.projects.get(&key)
+        .and_then(|p| p.panel_ratio)
+        .unwrap_or(DEFAULT_PANEL_RATIO)
+}
+
+/// Save panel ratio
+pub fn save_panel_ratio(ratio: f32) -> Result<()> {
+    let mut state = load_state();
+    let key = get_project_key();
+    let existing = state.projects.get(&key).cloned().unwrap_or_default();
+    state.projects.insert(key, ProjectState {
+        expanded: existing.expanded,
+        dep_expanded: existing.dep_expanded,
+        hierarchy_mode: existing.hierarchy_mode,
+        panel_ratio: Some(ratio),
     });
     save_state(&state)
 }

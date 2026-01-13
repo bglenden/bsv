@@ -254,6 +254,10 @@ struct App {
     edit_state: Option<EditState>,
     /// Current hierarchy view mode
     hierarchy_mode: HierarchyMode,
+    /// Panel width ratio (0.0-1.0, proportion for left panel)
+    panel_ratio: f32,
+    /// Whether we're currently dragging the divider
+    dragging_divider: bool,
 }
 
 impl App {
@@ -268,6 +272,8 @@ impl App {
             .and_then(|id| bd::get_issue_details(id).ok().flatten());
         let last_selected_id = tree.selected_id().map(|s| s.to_string());
 
+        let panel_ratio = state::load_panel_ratio();
+
         Ok(App {
             tree,
             should_quit: false,
@@ -278,6 +284,8 @@ impl App {
             detail_scroll: 0,
             edit_state: None,
             hierarchy_mode,
+            panel_ratio,
+            dragging_divider: false,
         })
     }
 
@@ -687,8 +695,8 @@ impl App {
     }
 
     fn handle_mouse(&mut self, column: u16, row: u16, screen_width: u16, screen_height: u16) {
-        // Roughly split at 40% for tree panel
-        let tree_width = screen_width * 40 / 100;
+        // Use panel_ratio for tree panel width
+        let tree_width = (screen_width as f32 * self.panel_ratio) as u16;
         if column < tree_width {
             self.focus = Focus::Tree;
             // Click on an issue to select it (account for border)
@@ -820,7 +828,7 @@ fn main() -> Result<()> {
     loop {
         let size = terminal.size()?;
         terminal.draw(|frame| {
-            ui::render(frame, &app.tree, app.selected_details.as_ref(), app.show_help, app.focus, app.detail_scroll, app.edit_state.as_ref());
+            ui::render(frame, &app.tree, app.selected_details.as_ref(), app.show_help, app.focus, app.detail_scroll, app.edit_state.as_ref(), app.panel_ratio);
         })?;
 
         // Check for file changes (non-blocking) with debounce
@@ -844,9 +852,32 @@ fn main() -> Result<()> {
                 }
                 Event::Mouse(mouse) => {
                     match mouse.kind {
-                        MouseEventKind::Down(_) | MouseEventKind::Up(MouseButton::Left) => {
-                            app.handle_mouse(mouse.column, mouse.row, size.width, size.height);
-                            app.update_selected_details();
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            // Check if click is near the divider (within 2 columns)
+                            let divider_col = (size.width as f32 * app.panel_ratio) as u16;
+                            if mouse.column >= divider_col.saturating_sub(2) && mouse.column <= divider_col + 2 {
+                                app.dragging_divider = true;
+                            } else {
+                                app.handle_mouse(mouse.column, mouse.row, size.width, size.height);
+                                app.update_selected_details();
+                            }
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            if app.dragging_divider {
+                                // Update panel ratio based on mouse position
+                                let new_ratio = mouse.column as f32 / size.width as f32;
+                                app.panel_ratio = new_ratio.clamp(0.15, 0.85);
+                            }
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            if app.dragging_divider {
+                                app.dragging_divider = false;
+                                // Save the new ratio
+                                let _ = state::save_panel_ratio(app.panel_ratio);
+                            } else {
+                                app.handle_mouse(mouse.column, mouse.row, size.width, size.height);
+                                app.update_selected_details();
+                            }
                         }
                         MouseEventKind::ScrollDown => {
                             if app.focus == Focus::Details {

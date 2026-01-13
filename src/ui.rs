@@ -273,10 +273,15 @@ fn parse_inline_markdown(text: &str) -> String {
     text.to_string()
 }
 
-pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Issue>, show_help: bool, focus: crate::Focus, detail_scroll: u16, edit_state: Option<&crate::EditState>) {
+#[allow(clippy::too_many_arguments)]
+pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Issue>, show_help: bool, focus: crate::Focus, detail_scroll: u16, edit_state: Option<&crate::EditState>, panel_ratio: f32) {
+    // Convert ratio to percentages, clamped to reasonable bounds
+    let left_percent = ((panel_ratio.clamp(0.15, 0.85)) * 100.0) as u16;
+    let right_percent = 100 - left_percent;
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints([Constraint::Percentage(left_percent), Constraint::Percentage(right_percent)])
         .split(frame.area());
 
     let tree_focused = focus == crate::Focus::Tree;
@@ -1085,7 +1090,7 @@ mod tests {
         let selected = make_test_issue("bsv-a", "First Issue", "open");
 
         terminal.draw(|frame| {
-            render(frame, &tree, Some(&selected), false, crate::Focus::Tree, 0, None);
+            render(frame, &tree, Some(&selected), false, crate::Focus::Tree, 0, None, 0.4);
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());
@@ -1108,7 +1113,7 @@ mod tests {
         let tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new(), HashSet::new(), HierarchyMode::IdBased);
 
         terminal.draw(|frame| {
-            render(frame, &tree, None, true, crate::Focus::Tree, 0, None); // show_help = true
+            render(frame, &tree, None, true, crate::Focus::Tree, 0, None, 0.4); // show_help = true
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());
