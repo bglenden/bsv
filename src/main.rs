@@ -741,7 +741,7 @@ fn print_help() {
     println!();
     println!("GLOBAL:");
     println!("    c          Toggle show/hide closed");
-    println!("    d          Toggle Epics/Blockers view");
+    println!("    d          Toggle Epics/Deps view");
     println!("    r          Refresh data from bd");
     println!("    ?          Show help overlay");
     println!("    q/Ctrl+C   Quit");

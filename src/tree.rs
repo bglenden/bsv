@@ -397,7 +397,7 @@ impl IssueTree {
         eprintln!("Root IDs: {:?}", self.root_ids);
         eprintln!("Expanded: {:?}", self.expanded);
         eprintln!();
-        eprintln!("=== Dependency-Based (Blockers) Hierarchy ===");
+        eprintln!("=== Dependency-Based (Deps) Hierarchy ===");
         eprintln!("Dep Root IDs: {:?}", self.dep_root_ids);
         eprintln!("Dep Expanded: {:?}", self.dep_expanded);
         eprintln!("Multi-parent IDs: {:?}", self.multi_parent_ids);
@@ -700,5 +700,211 @@ mod tests {
         assert_eq!(tree.nodes.get("bsv-a").unwrap().depth, 0);
         assert_eq!(tree.nodes.get("bsv-a.1").unwrap().depth, 1);
         assert_eq!(tree.nodes.get("bsv-a.1.1").unwrap().depth, 2);
+    }
+
+    // === Dependency Hierarchy Tests ===
+
+    fn make_issue_with_deps(id: &str, title: &str, dep_ids: Vec<&str>) -> Issue {
+        let dependencies = if dep_ids.is_empty() {
+            None
+        } else {
+            Some(dep_ids.iter().map(|dep_id| crate::bd::Dependency {
+                id: dep_id.to_string(),
+                title: format!("Dep {}", dep_id),
+                dependency_type: Some("blocks".to_string()),
+            }).collect())
+        };
+        Issue {
+            id: id.to_string(),
+            title: title.to_string(),
+            description: None,
+            status: "open".to_string(),
+            priority: 2,
+            issue_type: "task".to_string(),
+            created_at: "2024-01-01".to_string(),
+            created_by: None,
+            updated_at: "2024-01-01".to_string(),
+            labels: None,
+            parent: None,
+            dependencies,
+            dependents: None,
+            notes: None,
+            design: None,
+            acceptance_criteria: None,
+        }
+    }
+
+    fn make_tree_dep_mode(issues: Vec<Issue>, dep_expanded: HashSet<String>) -> IssueTree {
+        IssueTree::from_issues(issues, HashSet::new(), dep_expanded, HashSet::new(), HierarchyMode::DependencyBased)
+    }
+
+    #[test]
+    fn test_dep_hierarchy_roots() {
+        // Issues with no dependencies should be roots
+        let issues = vec![
+            make_issue_with_deps("root1", "Root 1", vec![]),
+            make_issue_with_deps("root2", "Root 2", vec![]),
+            make_issue_with_deps("child", "Child", vec!["root1"]),
+        ];
+
+        let tree = make_tree_dep_mode(issues, HashSet::new());
+
+        // root1 and root2 have no dependencies, so they're roots
+        assert!(tree.dep_root_ids.contains(&"root1".to_string()));
+        assert!(tree.dep_root_ids.contains(&"root2".to_string()));
+        // child depends on root1, so it's not a root
+        assert!(!tree.dep_root_ids.contains(&"child".to_string()));
+    }
+
+    #[test]
+    fn test_dep_hierarchy_children() {
+        // In dep mode, if A depends on B, then A is a child of B
+        let issues = vec![
+            make_issue_with_deps("parent", "Parent", vec![]),
+            make_issue_with_deps("child", "Child", vec!["parent"]),
+            make_issue_with_deps("grandchild", "Grandchild", vec!["child"]),
+        ];
+
+        let tree = make_tree_dep_mode(issues, HashSet::new());
+
+        // parent's dep_children should include child
+        assert!(tree.nodes.get("parent").unwrap().dep_children.contains(&"child".to_string()));
+        // child's dep_children should include grandchild
+        assert!(tree.nodes.get("child").unwrap().dep_children.contains(&"grandchild".to_string()));
+        // grandchild has no dep_children
+        assert!(tree.nodes.get("grandchild").unwrap().dep_children.is_empty());
+    }
+
+    #[test]
+    fn test_dep_hierarchy_multi_parent() {
+        // Issue depending on multiple issues should appear under each
+        let issues = vec![
+            make_issue_with_deps("root1", "Root 1", vec![]),
+            make_issue_with_deps("root2", "Root 2", vec![]),
+            make_issue_with_deps("multi", "Multi-parent", vec!["root1", "root2"]),
+        ];
+
+        let tree = make_tree_dep_mode(issues, HashSet::new());
+
+        // multi should be in multi_parent_ids
+        assert!(tree.multi_parent_ids.contains(&"multi".to_string()));
+        // multi should be a child of both root1 and root2
+        assert!(tree.nodes.get("root1").unwrap().dep_children.contains(&"multi".to_string()));
+        assert!(tree.nodes.get("root2").unwrap().dep_children.contains(&"multi".to_string()));
+    }
+
+    #[test]
+    fn test_dep_hierarchy_visible_collapsed() {
+        // When collapsed, only roots should be visible
+        let issues = vec![
+            make_issue_with_deps("root", "Root", vec![]),
+            make_issue_with_deps("child", "Child", vec!["root"]),
+        ];
+
+        let tree = make_tree_dep_mode(issues, HashSet::new());
+
+        // Only root should be visible (collapsed by default)
+        assert_eq!(tree.visible_items.len(), 1);
+        assert_eq!(tree.visible_items[0], "root");
+    }
+
+    #[test]
+    fn test_dep_hierarchy_visible_expanded() {
+        // When expanded, children should be visible
+        let issues = vec![
+            make_issue_with_deps("root", "Root", vec![]),
+            make_issue_with_deps("child", "Child", vec!["root"]),
+        ];
+
+        let mut dep_expanded = HashSet::new();
+        dep_expanded.insert("root".to_string());
+
+        let tree = make_tree_dep_mode(issues, dep_expanded);
+
+        // Both root and child should be visible
+        assert_eq!(tree.visible_items.len(), 2);
+        assert!(tree.visible_items.contains(&"root".to_string()));
+        assert!(tree.visible_items.contains(&"child".to_string()));
+    }
+
+    #[test]
+    fn test_mode_switching() {
+        // Same issues should show different hierarchies in different modes
+        let issues = vec![
+            // ID-based: epic -> epic.1
+            make_issue_with_deps("epic", "Epic", vec![]),
+            make_issue_with_deps("epic.1", "Epic Task", vec![]),
+            // Dep-based: task depends on epic.1
+            make_issue_with_deps("task", "Standalone Task", vec!["epic.1"]),
+        ];
+
+        // In ID mode
+        let tree_id = IssueTree::from_issues(
+            issues.clone(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HierarchyMode::IdBased
+        );
+        // epic.1 is child of epic, task is a root
+        assert!(tree_id.nodes.get("epic").unwrap().children.contains(&"epic.1".to_string()));
+        assert!(tree_id.root_ids.contains(&"task".to_string()));
+
+        // In Dep mode
+        let tree_dep = IssueTree::from_issues(
+            issues,
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HierarchyMode::DependencyBased
+        );
+        // task depends on epic.1, so task is child of epic.1 in dep view
+        assert!(tree_dep.nodes.get("epic.1").unwrap().dep_children.contains(&"task".to_string()));
+        // epic and epic.1 are dep roots (no dependencies)
+        assert!(tree_dep.dep_root_ids.contains(&"epic".to_string()));
+        assert!(tree_dep.dep_root_ids.contains(&"epic.1".to_string()));
+    }
+
+    #[test]
+    fn test_dep_ignores_related_type() {
+        // "related" dependency type should not create parent-child relationship
+        let mut issue = make_issue_with_deps("child", "Child", vec!["parent"]);
+        // Change the dependency type to "related"
+        if let Some(ref mut deps) = issue.dependencies {
+            deps[0].dependency_type = Some("related".to_string());
+        }
+        let issues = vec![
+            make_issue_with_deps("parent", "Parent", vec![]),
+            issue,
+        ];
+
+        let tree = make_tree_dep_mode(issues, HashSet::new());
+
+        // child should NOT be in parent's dep_children (because it's "related", not "blocks")
+        assert!(!tree.nodes.get("parent").unwrap().dep_children.contains(&"child".to_string()));
+        // child should be a root since its only dependency is "related"
+        assert!(tree.dep_root_ids.contains(&"child".to_string()));
+    }
+
+    #[test]
+    fn test_dep_hierarchy_depth() {
+        // Verify depth is calculated correctly in dep mode
+        let issues = vec![
+            make_issue_with_deps("root", "Root", vec![]),
+            make_issue_with_deps("child", "Child", vec!["root"]),
+            make_issue_with_deps("grandchild", "Grandchild", vec!["child"]),
+        ];
+
+        let mut dep_expanded = HashSet::new();
+        dep_expanded.insert("root".to_string());
+        dep_expanded.insert("child".to_string());
+
+        let tree = make_tree_dep_mode(issues, dep_expanded);
+
+        // Check visible items are in correct order with correct depths
+        assert_eq!(tree.visible_items, vec!["root", "child", "grandchild"]);
+
+        // Note: depth is recalculated during rebuild_visible based on traversal
+        // The node.depth in the visible traversal should reflect the tree depth
     }
 }

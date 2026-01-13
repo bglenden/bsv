@@ -358,7 +358,7 @@ fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: b
     // Show mode indicator in title
     let mode_indicator = match tree.hierarchy_mode {
         HierarchyMode::IdBased => "Epics",
-        HierarchyMode::DependencyBased => "Blockers",
+        HierarchyMode::DependencyBased => "Deps",
     };
     let title = format!(" Issues ({}) ", mode_indicator);
 
@@ -366,7 +366,7 @@ fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: b
     let list = List::new(items)
         .block(Block::default()
             .title(title)
-            .title_bottom(Line::from(" ? help  d=Epics/Blockers ").centered())
+            .title_bottom(Line::from(" ? help  d=Epics/Deps ").centered())
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color)));
 
@@ -667,7 +667,7 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from(""),
         Line::from(Span::styled("Global", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  c             Toggle show/hide closed"),
-        Line::from("  d             Toggle Epics/Blockers view"),
+        Line::from("  d             Toggle Epics/Deps view"),
         Line::from("  r             Refresh data"),
         Line::from("  ?             Toggle this help"),
         Line::from("  q / Ctrl+C    Quit"),
