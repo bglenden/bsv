@@ -9,11 +9,20 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Focus {
     Tree,
     Details,
+}
+
+/// Hierarchy mode for the tree view
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum HierarchyMode {
+    #[default]
+    IdBased,        // Current: dotted ID hierarchy (bsv-epic.1 is child of bsv-epic)
+    DependencyBased, // New: dependency chain hierarchy (blocked issues are children)
 }
 
 /// Which field is currently being edited
@@ -230,7 +239,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use state::{load_expanded, save_expanded};
+use state::save_expanded;
 use tree::IssueTree;
 
 struct App {
@@ -243,14 +252,16 @@ struct App {
     detail_scroll: u16,
     /// Active edit state (None when not editing)
     edit_state: Option<EditState>,
+    /// Current hierarchy view mode
+    hierarchy_mode: HierarchyMode,
 }
 
 impl App {
     fn new() -> Result<Self> {
-        let issues = bd::list_issues()?;
-        let expanded = load_expanded();
+        let issues = bd::list_issues_with_details()?;
+        let (expanded, dep_expanded, hierarchy_mode) = state::load_tree_state();
         let ready_ids = bd::get_ready_ids().unwrap_or_default();
-        let tree = IssueTree::from_issues(issues, expanded, ready_ids);
+        let tree = IssueTree::from_issues(issues, expanded, dep_expanded, ready_ids, hierarchy_mode);
 
         // Fetch details for initially selected issue
         let selected_details = tree.selected_id()
@@ -266,6 +277,7 @@ impl App {
             focus: Focus::Tree,
             detail_scroll: 0,
             edit_state: None,
+            hierarchy_mode,
         })
     }
 
@@ -289,9 +301,15 @@ impl App {
         let selected_id = self.tree.selected_id().map(|s| s.to_string());
         let show_closed = self.tree.show_closed;
 
-        if let Ok(issues) = bd::list_issues() {
+        if let Ok(issues) = bd::list_issues_with_details() {
             let ready_ids = bd::get_ready_ids().unwrap_or_default();
-            self.tree = IssueTree::from_issues(issues, self.tree.expanded.clone(), ready_ids);
+            self.tree = IssueTree::from_issues(
+                issues,
+                self.tree.expanded.clone(),
+                self.tree.dep_expanded.clone(),
+                ready_ids,
+                self.hierarchy_mode,
+            );
             self.tree.show_closed = show_closed;
             self.tree.rebuild_visible();
 
@@ -311,6 +329,21 @@ impl App {
     /// Check if we're currently in edit mode
     fn is_editing(&self) -> bool {
         self.edit_state.is_some()
+    }
+
+    /// Toggle between ID-based and Dependency-based hierarchy views
+    fn toggle_hierarchy_mode(&mut self) {
+        self.hierarchy_mode = match self.hierarchy_mode {
+            HierarchyMode::IdBased => HierarchyMode::DependencyBased,
+            HierarchyMode::DependencyBased => HierarchyMode::IdBased,
+        };
+        self.tree.set_hierarchy_mode(self.hierarchy_mode);
+        // Save the updated mode
+        let _ = state::save_tree_state(
+            &self.tree.expanded,
+            &self.tree.dep_expanded,
+            self.hierarchy_mode,
+        );
     }
 
     /// Start editing a field of the current issue
@@ -397,6 +430,12 @@ impl App {
             // Toggle show/hide closed (works from either panel)
             (KeyCode::Char('c'), KeyModifiers::NONE) => {
                 self.tree.toggle_show_closed();
+                return;
+            }
+
+            // Toggle hierarchy mode (ID-based vs Dependency-based)
+            (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                self.toggle_hierarchy_mode();
                 return;
             }
 
@@ -702,6 +741,7 @@ fn print_help() {
     println!();
     println!("GLOBAL:");
     println!("    c          Toggle show/hide closed");
+    println!("    d          Toggle Epics/Blockers view");
     println!("    r          Refresh data from bd");
     println!("    ?          Show help overlay");
     println!("    q/Ctrl+C   Quit");
@@ -736,10 +776,10 @@ fn main() -> Result<()> {
 
     // Debug mode: dump tree and exit
     if args.iter().any(|a| a == "--debug") {
-        let issues = bd::list_issues()?;
-        let expanded = load_expanded();
+        let issues = bd::list_issues_with_details()?;
+        let (expanded, dep_expanded, hierarchy_mode) = state::load_tree_state();
         let ready_ids = bd::get_ready_ids().unwrap_or_default();
-        let tree = IssueTree::from_issues(issues, expanded, ready_ids);
+        let tree = IssueTree::from_issues(issues, expanded, dep_expanded, ready_ids, hierarchy_mode);
         tree.debug_dump();
         return Ok(());
     }

@@ -292,19 +292,30 @@ pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Iss
 }
 
 fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: bool) {
+    use crate::HierarchyMode;
+
     let items: Vec<ListItem> = tree.visible_items
         .iter()
         .enumerate()
         .filter_map(|(idx, id)| {
             tree.nodes.get(id).map(|node| {
                 let is_selected = idx == tree.cursor;
-                let has_children = !node.children.is_empty();
-                let is_expanded = tree.is_expanded(id);
+                // Use mode-aware children check
+                let has_children = tree.has_children_in_current_mode(id);
+                let is_expanded = tree.is_expanded_in_current_mode(id);
                 let is_closed = node.issue.status == "closed";
                 let is_ready = tree.ready_ids.contains(id);
+                let is_multi_parent = tree.multi_parent_ids.contains(id);
 
                 // Build the tree prefix with indentation
-                let indent = "  ".repeat(node.depth);
+                // Use hybrid indent: normal up to depth 4, then show [N] indicator
+                const MAX_VISUAL_INDENT: usize = 4;
+                let indent = if node.depth <= MAX_VISUAL_INDENT {
+                    "  ".repeat(node.depth)
+                } else {
+                    format!("{}[{}]", "  ".repeat(MAX_VISUAL_INDENT), node.depth)
+                };
+
                 let icon = if has_children {
                     if is_expanded { "▼ " } else { "▶ " }
                 } else {
@@ -320,9 +331,16 @@ fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: b
                     Style::default().fg(Color::Red)
                 };
 
+                // Multi-parent issues in dependency view show ID in cyan
+                let id_style = if is_multi_parent && tree.hierarchy_mode == HierarchyMode::DependencyBased {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
                 let line = Line::from(vec![
                     Span::styled(format!("{}{}", indent, icon), text_style),
-                    Span::styled(format!("{} ", node.issue.id), Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("{} ", node.issue.id), id_style),
                     Span::styled(node.issue.title.clone(), text_style),
                 ]);
 
@@ -337,11 +355,18 @@ fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: b
         })
         .collect();
 
+    // Show mode indicator in title
+    let mode_indicator = match tree.hierarchy_mode {
+        HierarchyMode::IdBased => "Epics",
+        HierarchyMode::DependencyBased => "Blockers",
+    };
+    let title = format!(" Issues ({}) ", mode_indicator);
+
     let border_color = if focused { Color::Cyan } else { Color::DarkGray };
     let list = List::new(items)
         .block(Block::default()
-            .title(" Issues ")
-            .title_bottom(Line::from(" ? for help ").centered())
+            .title(title)
+            .title_bottom(Line::from(" ? help  d=Epics/Blockers ").centered())
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color)));
 
@@ -642,6 +667,7 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from(""),
         Line::from(Span::styled("Global", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  c             Toggle show/hide closed"),
+        Line::from("  d             Toggle Epics/Blockers view"),
         Line::from("  r             Refresh data"),
         Line::from("  ?             Toggle this help"),
         Line::from("  q / Ctrl+C    Quit"),
@@ -934,6 +960,8 @@ mod tests {
 
     #[test]
     fn test_tree_panel_snapshot() {
+        use crate::HierarchyMode;
+
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
 
@@ -947,7 +975,7 @@ mod tests {
         expanded.insert("bsv-a".to_string());
         let ready_ids = HashSet::new();
 
-        let tree = IssueTree::from_issues(issues, expanded, ready_ids);
+        let tree = IssueTree::from_issues(issues, expanded, HashSet::new(), ready_ids, HierarchyMode::IdBased);
 
         terminal.draw(|frame| {
             render_tree_panel(frame, &tree, frame.area(), true);
@@ -1040,6 +1068,8 @@ mod tests {
 
     #[test]
     fn test_full_render_function() {
+        use crate::HierarchyMode;
+
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
 
@@ -1051,7 +1081,7 @@ mod tests {
         let mut ready_ids = HashSet::new();
         ready_ids.insert("bsv-a".to_string());
 
-        let tree = IssueTree::from_issues(issues, expanded, ready_ids);
+        let tree = IssueTree::from_issues(issues, expanded, HashSet::new(), ready_ids, HierarchyMode::IdBased);
         let selected = make_test_issue("bsv-a", "First Issue", "open");
 
         terminal.draw(|frame| {
@@ -1069,11 +1099,13 @@ mod tests {
 
     #[test]
     fn test_full_render_with_help() {
+        use crate::HierarchyMode;
+
         let backend = TestBackend::new(100, 35);
         let mut terminal = Terminal::new(backend).unwrap();
 
         let issues = vec![make_test_issue("bsv-a", "Test", "open")];
-        let tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new());
+        let tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new(), HashSet::new(), HierarchyMode::IdBased);
 
         terminal.draw(|frame| {
             render(frame, &tree, None, true, crate::Focus::Tree, 0, None); // show_help = true

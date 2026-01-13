@@ -40,6 +40,7 @@ pub struct Dependency {
     pub dependency_type: Option<String>,
 }
 
+#[allow(dead_code)]
 pub fn list_issues() -> Result<Vec<Issue>> {
     // Use --status=all to include closed issues
     let output = Command::new("bd")
@@ -90,6 +91,52 @@ pub fn get_issue_details(id: &str) -> Result<Option<Issue>> {
     let issues: Vec<Issue> = serde_json::from_str(&stdout).unwrap_or_default();
 
     Ok(issues.into_iter().next())
+}
+
+/// List all issues with full details including dependencies.
+/// This calls `bd show` with all issue IDs to get complete data.
+pub fn list_issues_with_details() -> Result<Vec<Issue>> {
+    // First get the list of issue IDs
+    let list_output = Command::new("bd")
+        .args(["list", "--status=all", "--json"])
+        .output()
+        .context("Failed to run bd list")?;
+
+    if !list_output.status.success() {
+        let stderr = String::from_utf8_lossy(&list_output.stderr);
+        anyhow::bail!("bd list failed: {}", stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&list_output.stdout);
+    let basic_issues: Vec<Issue> = serde_json::from_str(&stdout)
+        .context("Failed to parse bd list output")?;
+
+    if basic_issues.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Get all issue IDs
+    let ids: Vec<&str> = basic_issues.iter().map(|i| i.id.as_str()).collect();
+
+    // Call bd show with all IDs to get full details including dependencies
+    let mut args = vec!["show", "--json"];
+    args.extend(ids);
+
+    let show_output = Command::new("bd")
+        .args(&args)
+        .output()
+        .context("Failed to run bd show")?;
+
+    if !show_output.status.success() {
+        // Fall back to basic list if show fails
+        return Ok(basic_issues);
+    }
+
+    let show_stdout = String::from_utf8_lossy(&show_output.stdout);
+    let detailed_issues: Vec<Issue> = serde_json::from_str(&show_stdout)
+        .unwrap_or(basic_issues);
+
+    Ok(detailed_issues)
 }
 
 /// Update an issue's title

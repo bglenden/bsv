@@ -1,34 +1,49 @@
 use crate::bd::Issue;
+use crate::HierarchyMode;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct TreeNode {
     pub issue: Issue,
-    pub children: Vec<String>,
+    pub children: Vec<String>,        // ID-based children (from dotted IDs)
+    pub dep_children: Vec<String>,    // Dependency-based children (issues that depend on this)
     pub depth: usize,
 }
 
 #[derive(Debug)]
 pub struct IssueTree {
     pub nodes: HashMap<String, TreeNode>,
-    pub root_ids: Vec<String>,
-    pub expanded: HashSet<String>,
+    pub root_ids: Vec<String>,              // ID-based roots (no dots or orphans)
+    pub dep_root_ids: Vec<String>,          // Dependency-based roots (no dependencies)
+    pub expanded: HashSet<String>,          // Expansion state for ID-based view
+    pub dep_expanded: HashSet<String>,      // Expansion state for dependency view
+    pub multi_parent_ids: HashSet<String>,  // Issues with multiple parents in dep view
     pub ready_ids: HashSet<String>,
     pub visible_items: Vec<String>,
     pub cursor: usize,
     pub show_closed: bool,
+    pub hierarchy_mode: HierarchyMode,
 }
 
 impl IssueTree {
-    pub fn from_issues(issues: Vec<Issue>, expanded: HashSet<String>, ready_ids: HashSet<String>) -> Self {
+    pub fn from_issues(
+        issues: Vec<Issue>,
+        expanded: HashSet<String>,
+        dep_expanded: HashSet<String>,
+        ready_ids: HashSet<String>,
+        hierarchy_mode: HierarchyMode,
+    ) -> Self {
         let mut nodes: HashMap<String, TreeNode> = HashMap::new();
         let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut dep_children_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut parent_count: HashMap<String, usize> = HashMap::new();
 
         // First pass: create all nodes
         for issue in &issues {
             nodes.insert(issue.id.clone(), TreeNode {
                 issue: issue.clone(),
                 children: vec![],
+                dep_children: vec![],
                 depth: 0,
             });
         }
@@ -43,14 +58,43 @@ impl IssueTree {
             }
         }
 
-        // Third pass: populate children lists
+        // Third pass: build dependency-based parent-child relationships
+        // If issue A depends on B (B blocks A), then A is a child of B in dep view
+        for issue in &issues {
+            if let Some(deps) = &issue.dependencies {
+                let blocking_deps: Vec<&crate::bd::Dependency> = deps.iter()
+                    .filter(|d| d.dependency_type.as_deref() != Some("related"))
+                    .collect();
+
+                // Track parent count for multi-parent detection
+                if blocking_deps.len() > 1 {
+                    parent_count.insert(issue.id.clone(), blocking_deps.len());
+                }
+
+                for dep in blocking_deps {
+                    // dep.id is the parent (blocker), issue.id is the child (blocked)
+                    if nodes.contains_key(&dep.id) {
+                        dep_children_map.entry(dep.id.clone())
+                            .or_default()
+                            .push(issue.id.clone());
+                    }
+                }
+            }
+        }
+
+        // Populate children lists
         for (parent_id, child_ids) in &children_map {
             if let Some(node) = nodes.get_mut(parent_id) {
                 node.children = child_ids.clone();
             }
         }
+        for (parent_id, child_ids) in &dep_children_map {
+            if let Some(node) = nodes.get_mut(parent_id) {
+                node.dep_children = child_ids.clone();
+            }
+        }
 
-        // Find root nodes: no dot in ID, OR parent from dotted ID doesn't exist
+        // Find ID-based root nodes: no dot in ID, OR parent from dotted ID doesn't exist
         let mut root_ids: Vec<String> = nodes.keys()
             .filter(|id| {
                 match Self::parent_from_dotted_id(id) {
@@ -61,22 +105,50 @@ impl IssueTree {
             .cloned()
             .collect();
 
+        // Find dependency-based root nodes: issues with no blocking dependencies
+        let mut dep_root_ids: Vec<String> = nodes.keys()
+            .filter(|id| {
+                let node = nodes.get(*id).unwrap();
+                let has_blocking_deps = node.issue.dependencies
+                    .as_ref()
+                    .map(|deps| deps.iter().any(|d| {
+                        d.dependency_type.as_deref() != Some("related") &&
+                        nodes.contains_key(&d.id)
+                    }))
+                    .unwrap_or(false);
+                !has_blocking_deps
+            })
+            .cloned()
+            .collect();
+
         // Sort roots by priority then by title
-        root_ids.sort_by(|a, b| {
+        let sort_fn = |a: &String, b: &String| {
             let node_a = nodes.get(a).unwrap();
             let node_b = nodes.get(b).unwrap();
             node_a.issue.priority.cmp(&node_b.issue.priority)
                 .then_with(|| node_a.issue.title.cmp(&node_b.issue.title))
-        });
+        };
+        root_ids.sort_by(sort_fn);
+        dep_root_ids.sort_by(sort_fn);
+
+        // Identify multi-parent issues
+        let multi_parent_ids: HashSet<String> = parent_count.into_iter()
+            .filter(|(_, count)| *count > 1)
+            .map(|(id, _)| id)
+            .collect();
 
         let mut tree = IssueTree {
             nodes,
             root_ids,
+            dep_root_ids,
             expanded,
+            dep_expanded,
+            multi_parent_ids,
             ready_ids,
             visible_items: vec![],
             cursor: 0,
             show_closed: true,
+            hierarchy_mode,
         };
 
         tree.rebuild_visible();
@@ -90,15 +162,25 @@ impl IssueTree {
 
     pub fn rebuild_visible(&mut self) {
         self.visible_items.clear();
-        for root_id in &self.root_ids.clone() {
-            self.add_visible_recursive(root_id, 0);
+        match self.hierarchy_mode {
+            HierarchyMode::IdBased => {
+                for root_id in &self.root_ids.clone() {
+                    self.add_visible_recursive_id(root_id, 0);
+                }
+            }
+            HierarchyMode::DependencyBased => {
+                let mut visited = HashSet::new();
+                for root_id in &self.dep_root_ids.clone() {
+                    self.add_visible_recursive_dep(root_id, 0, &mut visited);
+                }
+            }
         }
         if self.cursor >= self.visible_items.len() && !self.visible_items.is_empty() {
             self.cursor = self.visible_items.len() - 1;
         }
     }
 
-    fn add_visible_recursive(&mut self, id: &str, depth: usize) {
+    fn add_visible_recursive_id(&mut self, id: &str, depth: usize) {
         // Skip closed issues if show_closed is false
         if !self.show_closed {
             if let Some(node) = self.nodes.get(id) {
@@ -130,10 +212,85 @@ impl IssueTree {
                     }
                 });
                 for child_id in children {
-                    self.add_visible_recursive(&child_id, depth + 1);
+                    self.add_visible_recursive_id(&child_id, depth + 1);
                 }
             }
         }
+    }
+
+    fn add_visible_recursive_dep(&mut self, id: &str, depth: usize, visited: &mut HashSet<String>) {
+        // Skip closed issues if show_closed is false
+        if !self.show_closed {
+            if let Some(node) = self.nodes.get(id) {
+                if node.issue.status == "closed" {
+                    return;
+                }
+            }
+        }
+
+        // Cycle detection: if already fully visited, skip entirely
+        // But we DO want to show multi-parent items multiple times
+        // So we only track "in current path" for cycle detection
+        if visited.contains(id) {
+            return; // Already in current traversal path - cycle detected
+        }
+
+        self.visible_items.push(id.to_string());
+
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.depth = depth;
+        }
+
+        if self.dep_expanded.contains(id) {
+            if let Some(node) = self.nodes.get(id).cloned() {
+                let mut children = node.dep_children.clone();
+                // Sort children by priority then title
+                children.sort_by(|a, b| {
+                    let node_a = self.nodes.get(a);
+                    let node_b = self.nodes.get(b);
+                    match (node_a, node_b) {
+                        (Some(na), Some(nb)) => {
+                            na.issue.priority.cmp(&nb.issue.priority)
+                                .then_with(|| na.issue.title.cmp(&nb.issue.title))
+                        }
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
+                visited.insert(id.to_string()); // Mark as in-path
+                for child_id in children {
+                    self.add_visible_recursive_dep(&child_id, depth + 1, visited);
+                }
+                visited.remove(id); // Remove from path when backtracking
+            }
+        }
+    }
+
+    /// Get the current expansion state based on hierarchy mode
+    fn current_expanded(&self) -> &HashSet<String> {
+        match self.hierarchy_mode {
+            HierarchyMode::IdBased => &self.expanded,
+            HierarchyMode::DependencyBased => &self.dep_expanded,
+        }
+    }
+
+    /// Get the current children for a node based on hierarchy mode
+    fn current_children<'a>(&self, node: &'a TreeNode) -> &'a Vec<String> {
+        match self.hierarchy_mode {
+            HierarchyMode::IdBased => &node.children,
+            HierarchyMode::DependencyBased => &node.dep_children,
+        }
+    }
+
+    /// Check if a node has children in the current hierarchy mode
+    pub fn has_children_in_current_mode(&self, id: &str) -> bool {
+        self.nodes.get(id)
+            .map(|n| !self.current_children(n).is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Check if a node is expanded in the current hierarchy mode
+    pub fn is_expanded_in_current_mode(&self, id: &str) -> bool {
+        self.current_expanded().contains(id)
     }
 
     pub fn selected_id(&self) -> Option<&str> {
@@ -168,24 +325,30 @@ impl IssueTree {
 
     pub fn toggle_expand(&mut self) {
         if let Some(id) = self.selected_id().map(|s| s.to_string()) {
-            if let Some(node) = self.nodes.get(&id) {
-                if !node.children.is_empty() {
-                    if self.expanded.contains(&id) {
-                        self.expanded.remove(&id);
-                    } else {
-                        self.expanded.insert(id);
-                    }
-                    self.rebuild_visible();
+            if self.has_children_in_current_mode(&id) {
+                let expanded = match self.hierarchy_mode {
+                    HierarchyMode::IdBased => &mut self.expanded,
+                    HierarchyMode::DependencyBased => &mut self.dep_expanded,
+                };
+                if expanded.contains(&id) {
+                    expanded.remove(&id);
+                } else {
+                    expanded.insert(id);
                 }
+                self.rebuild_visible();
             }
         }
     }
 
     pub fn expand(&mut self) {
         if let Some(id) = self.selected_id().map(|s| s.to_string()) {
-            if let Some(node) = self.nodes.get(&id) {
-                if !node.children.is_empty() && !self.expanded.contains(&id) {
-                    self.expanded.insert(id);
+            if self.has_children_in_current_mode(&id) {
+                let expanded = match self.hierarchy_mode {
+                    HierarchyMode::IdBased => &mut self.expanded,
+                    HierarchyMode::DependencyBased => &mut self.dep_expanded,
+                };
+                if !expanded.contains(&id) {
+                    expanded.insert(id);
                     self.rebuild_visible();
                 }
             }
@@ -194,12 +357,30 @@ impl IssueTree {
 
     pub fn collapse(&mut self) {
         if let Some(id) = self.selected_id().map(|s| s.to_string()) {
-            if self.expanded.contains(&id) {
-                self.expanded.remove(&id);
+            let expanded = match self.hierarchy_mode {
+                HierarchyMode::IdBased => &mut self.expanded,
+                HierarchyMode::DependencyBased => &mut self.dep_expanded,
+            };
+            if expanded.contains(&id) {
+                expanded.remove(&id);
                 self.rebuild_visible();
             } else {
-                // If already collapsed or leaf, move to parent (based on dotted ID)
-                if let Some(parent_id) = Self::parent_from_dotted_id(&id) {
+                // If already collapsed or leaf, move to parent
+                // In ID mode: use dotted ID parent
+                // In Dep mode: find first dependency (if any)
+                let parent_id = match self.hierarchy_mode {
+                    HierarchyMode::IdBased => Self::parent_from_dotted_id(&id),
+                    HierarchyMode::DependencyBased => {
+                        self.nodes.get(&id).and_then(|node| {
+                            node.issue.dependencies.as_ref().and_then(|deps| {
+                                deps.iter()
+                                    .find(|d| d.dependency_type.as_deref() != Some("related"))
+                                    .map(|d| d.id.clone())
+                            })
+                        })
+                    }
+                };
+                if let Some(parent_id) = parent_id {
                     if let Some(pos) = self.visible_items.iter().position(|x| x == &parent_id) {
                         self.cursor = pos;
                     }
@@ -210,14 +391,30 @@ impl IssueTree {
 
     pub fn debug_dump(&self) {
         eprintln!("=== Tree Debug Dump ===");
+        eprintln!("Hierarchy Mode: {:?}", self.hierarchy_mode);
+        eprintln!();
+        eprintln!("=== ID-Based (Epics) Hierarchy ===");
         eprintln!("Root IDs: {:?}", self.root_ids);
         eprintln!("Expanded: {:?}", self.expanded);
+        eprintln!();
+        eprintln!("=== Dependency-Based (Blockers) Hierarchy ===");
+        eprintln!("Dep Root IDs: {:?}", self.dep_root_ids);
+        eprintln!("Dep Expanded: {:?}", self.dep_expanded);
+        eprintln!("Multi-parent IDs: {:?}", self.multi_parent_ids);
+        eprintln!();
         eprintln!("Ready IDs: {:?}", self.ready_ids);
-        eprintln!("\nAll nodes:");
+        eprintln!();
+        eprintln!("All nodes:");
         for (id, node) in &self.nodes {
-            eprintln!("  {} -> children: {:?}, depth: {}", id, node.children, node.depth);
+            let deps_info = if !node.dep_children.is_empty() {
+                format!(", dep_children: {:?}", node.dep_children)
+            } else {
+                String::new()
+            };
+            eprintln!("  {} -> children: {:?}{}", id, node.children, deps_info);
         }
-        eprintln!("\nVisible items (cursor={}):", self.cursor);
+        eprintln!();
+        eprintln!("Visible items (cursor={}, mode={:?}):", self.cursor, self.hierarchy_mode);
         for (i, id) in self.visible_items.iter().enumerate() {
             let marker = if i == self.cursor { ">" } else { " " };
             if let Some(node) = self.nodes.get(id) {
@@ -229,7 +426,8 @@ impl IssueTree {
                 } else {
                     "[BLOCKED]"
                 };
-                eprintln!("{} {}{} - {} {}", marker, indent, id, node.issue.title, status);
+                let multi = if self.multi_parent_ids.contains(id) { " [MULTI]" } else { "" };
+                eprintln!("{} {}{} - {} {}{}", marker, indent, id, node.issue.title, status, multi);
             }
         }
         eprintln!("=== End Dump ===");
@@ -240,27 +438,43 @@ impl IssueTree {
         self.nodes.get(id).map(|n| !n.children.is_empty()).unwrap_or(false)
     }
 
+    #[allow(dead_code)]
     pub fn is_expanded(&self, id: &str) -> bool {
-        self.expanded.contains(id)
+        self.current_expanded().contains(id)
     }
 
     pub fn toggle_expand_all(&mut self) {
+        let expanded = match self.hierarchy_mode {
+            HierarchyMode::IdBased => &mut self.expanded,
+            HierarchyMode::DependencyBased => &mut self.dep_expanded,
+        };
+
         // If anything is expanded, collapse all; otherwise expand all
-        if self.expanded.is_empty() {
-            // Expand all nodes with children
+        if expanded.is_empty() {
+            // Expand all nodes with children (in current mode)
             for (id, node) in &self.nodes {
-                if !node.children.is_empty() {
-                    self.expanded.insert(id.clone());
+                let has_children = match self.hierarchy_mode {
+                    HierarchyMode::IdBased => !node.children.is_empty(),
+                    HierarchyMode::DependencyBased => !node.dep_children.is_empty(),
+                };
+                if has_children {
+                    expanded.insert(id.clone());
                 }
             }
         } else {
-            self.expanded.clear();
+            expanded.clear();
         }
         self.rebuild_visible();
     }
 
     pub fn toggle_show_closed(&mut self) {
         self.show_closed = !self.show_closed;
+        self.rebuild_visible();
+    }
+
+    /// Set the hierarchy mode and rebuild visible items
+    pub fn set_hierarchy_mode(&mut self, mode: HierarchyMode) {
+        self.hierarchy_mode = mode;
         self.rebuild_visible();
     }
 }
@@ -291,6 +505,11 @@ mod tests {
         }
     }
 
+    /// Helper to create a tree with ID-based hierarchy (default mode)
+    fn make_tree(issues: Vec<Issue>, expanded: HashSet<String>, ready_ids: HashSet<String>) -> IssueTree {
+        IssueTree::from_issues(issues, expanded, HashSet::new(), ready_ids, HierarchyMode::IdBased)
+    }
+
     #[test]
     fn test_parent_from_dotted_id() {
         // No dot = no parent
@@ -313,7 +532,7 @@ mod tests {
             make_issue("bsv-c", "Issue C", 2),
         ];
 
-        let tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new());
+        let tree = make_tree(issues, HashSet::new(), HashSet::new());
 
         assert_eq!(tree.root_ids.len(), 3);
         // Should be sorted by priority then title
@@ -331,7 +550,7 @@ mod tests {
             make_issue("bsv-epic.1.1", "Subtask 1.1", 2),
         ];
 
-        let tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new());
+        let tree = make_tree(issues, HashSet::new(), HashSet::new());
 
         // Only the epic should be a root
         assert_eq!(tree.root_ids.len(), 1);
@@ -359,7 +578,7 @@ mod tests {
             make_issue("bsv-other", "Other", 2),
         ];
 
-        let tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new());
+        let tree = make_tree(issues, HashSet::new(), HashSet::new());
 
         // Both should be roots since bsv-epic doesn't exist
         assert_eq!(tree.root_ids.len(), 2);
@@ -375,7 +594,7 @@ mod tests {
             make_issue("bsv-b", "B", 2),
         ];
 
-        let tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new());
+        let tree = make_tree(issues, HashSet::new(), HashSet::new());
 
         // With nothing expanded, should only see roots
         assert_eq!(tree.visible_items.len(), 2);
@@ -394,7 +613,7 @@ mod tests {
         let mut expanded = HashSet::new();
         expanded.insert("bsv-a".to_string());
 
-        let tree = IssueTree::from_issues(issues, expanded, HashSet::new());
+        let tree = make_tree(issues, expanded, HashSet::new());
 
         // Should see A, A.1, and B
         assert_eq!(tree.visible_items.len(), 3);
@@ -408,7 +627,7 @@ mod tests {
             make_issue("bsv-c", "C", 2),
         ];
 
-        let mut tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new());
+        let mut tree = make_tree(issues, HashSet::new(), HashSet::new());
 
         assert_eq!(tree.cursor, 0);
         assert_eq!(tree.selected_id(), Some("bsv-a"));
@@ -441,7 +660,7 @@ mod tests {
             make_issue("bsv-a.1", "A.1", 2),
         ];
 
-        let mut tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new());
+        let mut tree = make_tree(issues, HashSet::new(), HashSet::new());
 
         // Initially only root visible
         assert_eq!(tree.visible_items.len(), 1);
@@ -476,7 +695,7 @@ mod tests {
         expanded.insert("bsv-a".to_string());
         expanded.insert("bsv-a.1".to_string());
 
-        let tree = IssueTree::from_issues(issues, expanded, HashSet::new());
+        let tree = make_tree(issues, expanded, HashSet::new());
 
         assert_eq!(tree.nodes.get("bsv-a").unwrap().depth, 0);
         assert_eq!(tree.nodes.get("bsv-a.1").unwrap().depth, 1);

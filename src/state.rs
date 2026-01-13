@@ -1,3 +1,4 @@
+use crate::HierarchyMode;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -9,9 +10,13 @@ pub struct AppState {
     pub projects: HashMap<String, ProjectState>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ProjectState {
     pub expanded: HashSet<String>,
+    #[serde(default)]
+    pub dep_expanded: HashSet<String>,
+    #[serde(default)]
+    pub hierarchy_mode: Option<HierarchyMode>,
 }
 
 fn state_file_path() -> Option<PathBuf> {
@@ -59,6 +64,7 @@ pub fn get_project_key() -> String {
         .unwrap_or_else(|_| "default".to_string())
 }
 
+#[allow(dead_code)]
 pub fn load_expanded() -> HashSet<String> {
     let state = load_state();
     let key = get_project_key();
@@ -67,11 +73,45 @@ pub fn load_expanded() -> HashSet<String> {
         .unwrap_or_default()
 }
 
+/// Load all tree-related state: expanded (ID mode), dep_expanded (Dep mode), and hierarchy_mode
+pub fn load_tree_state() -> (HashSet<String>, HashSet<String>, HierarchyMode) {
+    let state = load_state();
+    let key = get_project_key();
+    if let Some(project) = state.projects.get(&key) {
+        (
+            project.expanded.clone(),
+            project.dep_expanded.clone(),
+            project.hierarchy_mode.unwrap_or_default(),
+        )
+    } else {
+        (HashSet::new(), HashSet::new(), HierarchyMode::default())
+    }
+}
+
 pub fn save_expanded(expanded: &HashSet<String>) -> Result<()> {
+    let mut state = load_state();
+    let key = get_project_key();
+    let existing = state.projects.get(&key).cloned().unwrap_or_default();
+    state.projects.insert(key, ProjectState {
+        expanded: expanded.clone(),
+        dep_expanded: existing.dep_expanded,
+        hierarchy_mode: existing.hierarchy_mode,
+    });
+    save_state(&state)
+}
+
+/// Save the full tree state
+pub fn save_tree_state(
+    expanded: &HashSet<String>,
+    dep_expanded: &HashSet<String>,
+    hierarchy_mode: HierarchyMode,
+) -> Result<()> {
     let mut state = load_state();
     let key = get_project_key();
     state.projects.insert(key, ProjectState {
         expanded: expanded.clone(),
+        dep_expanded: dep_expanded.clone(),
+        hierarchy_mode: Some(hierarchy_mode),
     });
     save_state(&state)
 }
