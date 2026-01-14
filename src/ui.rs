@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
@@ -274,7 +274,7 @@ fn parse_inline_markdown(text: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Issue>, show_help: bool, focus: crate::Focus, detail_scroll: u16, edit_state: Option<&crate::EditState>, panel_ratio: f32) {
+pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Issue>, show_help: bool, focus: crate::Focus, detail_scroll: u16, edit_state: Option<&crate::EditState>, panel_ratio: f32, tree_scroll: usize) {
     // Convert ratio to percentages, clamped to reasonable bounds
     let left_percent = ((panel_ratio.clamp(0.15, 0.85)) * 100.0) as u16;
     let right_percent = 100 - left_percent;
@@ -285,7 +285,7 @@ pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Iss
         .split(frame.area());
 
     let tree_focused = focus == crate::Focus::Tree;
-    render_tree_panel(frame, tree, chunks[0], tree_focused);
+    render_tree_panel(frame, tree, chunks[0], tree_focused, tree_scroll);
 
     // Use full details if available (has dependencies), otherwise fall back to tree node
     let issue_for_details = selected_details.or_else(|| tree.selected_node().map(|n| &n.issue));
@@ -296,7 +296,7 @@ pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Iss
     }
 }
 
-fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: bool) {
+fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: bool, tree_scroll: usize) {
     use crate::HierarchyMode;
 
     let items: Vec<ListItem> = tree.visible_items
@@ -375,7 +375,13 @@ fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: b
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color)));
 
-    frame.render_widget(list, area);
+    // Use ListState to track scroll position and auto-scroll to selected item
+    let mut list_state = ListState::default()
+        .with_offset(tree_scroll);
+    if !tree.visible_items.is_empty() {
+        list_state.select(Some(tree.cursor));
+    }
+    frame.render_stateful_widget(list, area, &mut list_state);
 }
 
 fn render_detail_panel(frame: &mut Frame, issue: Option<&Issue>, ready_ids: &std::collections::HashSet<String>, area: Rect, focused: bool, scroll: u16, edit_state: Option<&crate::EditState>) {
@@ -987,7 +993,7 @@ mod tests {
         let tree = IssueTree::from_issues(issues, expanded, HashSet::new(), ready_ids, HierarchyMode::IdBased);
 
         terminal.draw(|frame| {
-            render_tree_panel(frame, &tree, frame.area(), true);
+            render_tree_panel(frame, &tree, frame.area(), true, 0);
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());
@@ -1094,7 +1100,7 @@ mod tests {
         let selected = make_test_issue("bsv-a", "First Issue", "open");
 
         terminal.draw(|frame| {
-            render(frame, &tree, Some(&selected), false, crate::Focus::Tree, 0, None, 0.4);
+            render(frame, &tree, Some(&selected), false, crate::Focus::Tree, 0, None, 0.4, 0);
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());
@@ -1117,7 +1123,7 @@ mod tests {
         let tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new(), HashSet::new(), HierarchyMode::IdBased);
 
         terminal.draw(|frame| {
-            render(frame, &tree, None, true, crate::Focus::Tree, 0, None, 0.4); // show_help = true
+            render(frame, &tree, None, true, crate::Focus::Tree, 0, None, 0.4, 0); // show_help = true
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());

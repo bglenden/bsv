@@ -258,6 +258,8 @@ struct App {
     panel_ratio: f32,
     /// Whether we're currently dragging the divider
     dragging_divider: bool,
+    /// Tree panel scroll offset (for mouse click handling)
+    tree_scroll: usize,
 }
 
 impl App {
@@ -286,6 +288,7 @@ impl App {
             hierarchy_mode,
             panel_ratio,
             dragging_divider: false,
+            tree_scroll: 0,
         })
     }
 
@@ -699,15 +702,36 @@ impl App {
         let tree_width = (screen_width as f32 * self.panel_ratio) as u16;
         if column < tree_width {
             self.focus = Focus::Tree;
-            // Click on an issue to select it (account for border)
+            // Click on an issue to select it (account for border and scroll offset)
             if row > 0 && row < screen_height - 1 {
-                let clicked_index = (row - 1) as usize;
+                let visual_index = (row - 1) as usize;
+                let clicked_index = self.tree_scroll + visual_index;
                 if clicked_index < self.tree.visible_items.len() {
                     self.tree.cursor = clicked_index;
+                    // Update scroll to keep new position valid
+                    self.update_tree_scroll(screen_height);
                 }
             }
         } else {
             self.focus = Focus::Details;
+        }
+    }
+
+    /// Update tree scroll offset to keep cursor visible
+    fn update_tree_scroll(&mut self, screen_height: u16) {
+        // Account for borders: visible area is screen_height - 2
+        let visible_height = screen_height.saturating_sub(2) as usize;
+        if visible_height == 0 {
+            return;
+        }
+
+        // Ensure cursor is visible in the current scroll range
+        if self.tree.cursor < self.tree_scroll {
+            // Cursor is above visible area
+            self.tree_scroll = self.tree.cursor;
+        } else if self.tree.cursor >= self.tree_scroll + visible_height {
+            // Cursor is below visible area
+            self.tree_scroll = self.tree.cursor.saturating_sub(visible_height - 1);
         }
     }
 }
@@ -831,8 +855,10 @@ fn main() -> Result<()> {
     // Main loop
     loop {
         let size = terminal.size()?;
+        // Update tree scroll to keep cursor visible
+        app.update_tree_scroll(size.height);
         terminal.draw(|frame| {
-            ui::render(frame, &app.tree, app.selected_details.as_ref(), app.show_help, app.focus, app.detail_scroll, app.edit_state.as_ref(), app.panel_ratio);
+            ui::render(frame, &app.tree, app.selected_details.as_ref(), app.show_help, app.focus, app.detail_scroll, app.edit_state.as_ref(), app.panel_ratio, app.tree_scroll);
         })?;
 
         // Check for file changes (non-blocking) with debounce

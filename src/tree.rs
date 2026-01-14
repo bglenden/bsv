@@ -90,7 +90,12 @@ impl IssueTree {
         }
         for (parent_id, child_ids) in &dep_children_map {
             if let Some(node) = nodes.get_mut(parent_id) {
-                node.dep_children = child_ids.clone();
+                // Deduplicate children in case of duplicate dependencies in source data
+                let mut seen = HashSet::new();
+                node.dep_children = child_ids.iter()
+                    .filter(|id| seen.insert(id.to_string()))
+                    .cloned()
+                    .collect();
             }
         }
 
@@ -170,8 +175,11 @@ impl IssueTree {
             }
             HierarchyMode::DependencyBased => {
                 let mut visited = HashSet::new();
+                // Track all items already added to avoid duplicates anywhere in the tree
+                // This prevents items from appearing multiple times at different depths
+                let mut added: HashSet<String> = HashSet::new();
                 for root_id in &self.dep_root_ids.clone() {
-                    self.add_visible_recursive_dep(root_id, 0, &mut visited);
+                    self.add_visible_recursive_dep(root_id, 0, &mut visited, &mut added);
                 }
             }
         }
@@ -225,22 +233,34 @@ impl IssueTree {
         }
     }
 
-    fn add_visible_recursive_dep(&mut self, id: &str, depth: usize, visited: &mut HashSet<String>) {
+    fn add_visible_recursive_dep(
+        &mut self,
+        id: &str,
+        depth: usize,
+        visited: &mut HashSet<String>,
+        added: &mut HashSet<String>,
+    ) {
         // Check if this issue is closed
         let is_closed = self.nodes.get(id)
             .map(|node| node.issue.status == "closed")
             .unwrap_or(false);
 
         // Cycle detection: if already in current path, skip to prevent infinite loops
-        // But we DO want to show multi-parent items multiple times
-        // So we only track "in current path" for cycle detection
         if visited.contains(id) {
             return; // Already in current traversal path - cycle detected
         }
 
+        // Check if this node is hidden (closed and not showing closed)
+        let is_hidden = !self.show_closed && is_closed;
+
         // Only add to visible if showing closed OR issue is not closed
         if self.show_closed || !is_closed {
+            // Global deduplication: show each item only once (first occurrence wins)
+            if added.contains(id) {
+                return; // Already shown elsewhere in tree, skip entirely
+            }
             self.visible_items.push(id.to_string());
+            added.insert(id.to_string());
 
             if let Some(node) = self.nodes.get_mut(id) {
                 node.depth = depth;
@@ -250,7 +270,7 @@ impl IssueTree {
         // Traverse children if:
         // 1. This node is expanded, OR
         // 2. This node is closed and hidden (so open children can still appear)
-        let should_traverse = self.dep_expanded.contains(id) || (!self.show_closed && is_closed);
+        let should_traverse = self.dep_expanded.contains(id) || is_hidden;
 
         if should_traverse {
             if let Some(node) = self.nodes.get(id).cloned() {
@@ -270,9 +290,9 @@ impl IssueTree {
                 visited.insert(id.to_string()); // Mark as in-path
                 // If current node is hidden (closed), children appear at same depth
                 // Otherwise, children are indented
-                let child_depth = if !self.show_closed && is_closed { depth } else { depth + 1 };
+                let child_depth = if is_hidden { depth } else { depth + 1 };
                 for child_id in children {
-                    self.add_visible_recursive_dep(&child_id, child_depth, visited);
+                    self.add_visible_recursive_dep(&child_id, child_depth, visited, added);
                 }
                 visited.remove(id); // Remove from path when backtracking
             }
@@ -1047,5 +1067,177 @@ mod tests {
 
         // It should appear at depth 0 (since its only parent is hidden)
         assert_eq!(tree.nodes.get("blocked").unwrap().depth, 0);
+    }
+
+    #[test]
+    fn test_no_duplicates_from_multiple_hidden_closed_parents() {
+        // When multiple hidden closed parents share the same open child,
+        // the child should only appear once (not duplicated)
+        let mut closed1 = make_issue_with_deps("closed1", "Closed Blocker 1", vec![]);
+        closed1.status = "closed".to_string();
+
+        let mut closed2 = make_issue_with_deps("closed2", "Closed Blocker 2", vec![]);
+        closed2.status = "closed".to_string();
+
+        let issues = vec![
+            closed1,
+            closed2,
+            make_issue_with_deps("shared_child", "Shared Open Child", vec!["closed1", "closed2"]),
+        ];
+
+        let mut tree = IssueTree::from_issues(
+            issues,
+            HashSet::new(),
+            HashSet::new(), // not expanded - closed items will auto-traverse when hidden
+            HashSet::new(),
+            HierarchyMode::DependencyBased
+        );
+
+        // With show_closed = true, only roots are visible (nothing expanded)
+        // closed1 and closed2 are roots, shared_child is not visible yet
+        assert_eq!(tree.visible_items.len(), 2);
+
+        // Toggle show_closed to false - now closed items are hidden but auto-traversed
+        tree.toggle_show_closed();
+
+        // The shared child should appear only ONCE, not twice
+        // (even though it's a child of two different hidden closed parents)
+        assert_eq!(tree.visible_items.len(), 1);
+        assert!(tree.visible_items.contains(&"shared_child".to_string()));
+
+        // Count how many times shared_child appears
+        let count = tree.visible_items.iter()
+            .filter(|id| *id == "shared_child")
+            .count();
+        assert_eq!(count, 1, "shared_child should appear exactly once, not {} times", count);
+    }
+
+    #[test]
+    fn test_no_duplicates_multi_path_different_depths() {
+        // Test the scenario where an item has multiple parents at different depths
+        // and would otherwise appear multiple times at different depths.
+        //
+        // Structure:
+        //   root (expanded)
+        //   ├── parent_a (expanded)
+        //   │   └── shared_leaf (depends on parent_a)
+        //   └── parent_b (expanded)
+        //       └── child_b (expanded)
+        //           └── shared_leaf (depends on child_b too)
+        //
+        // Without deduplication, shared_leaf would appear at depth 2 (under parent_a)
+        // AND at depth 3 (under child_b). With global deduplication, it appears only once.
+        let issues = vec![
+            make_issue_with_deps("root", "Root", vec![]),
+            make_issue_with_deps("parent_a", "Parent A", vec!["root"]),
+            make_issue_with_deps("parent_b", "Parent B", vec!["root"]),
+            make_issue_with_deps("child_b", "Child B", vec!["parent_b"]),
+            make_issue_with_deps("shared_leaf", "Shared Leaf", vec!["parent_a", "child_b"]),
+        ];
+
+        let mut dep_expanded = HashSet::new();
+        dep_expanded.insert("root".to_string());
+        dep_expanded.insert("parent_a".to_string());
+        dep_expanded.insert("parent_b".to_string());
+        dep_expanded.insert("child_b".to_string());
+
+        let tree = IssueTree::from_issues(
+            issues,
+            HashSet::new(),
+            dep_expanded,
+            HashSet::new(),
+            HierarchyMode::DependencyBased
+        );
+
+        // shared_leaf should appear exactly once
+        let count = tree.visible_items.iter()
+            .filter(|id| *id == "shared_leaf")
+            .count();
+        assert_eq!(count, 1, "shared_leaf should appear exactly once, not {} times", count);
+
+        // Verify total structure: root, parent_a, shared_leaf, parent_b, child_b
+        // (shared_leaf appears under parent_a first due to traversal order)
+        assert_eq!(tree.visible_items.len(), 5);
+    }
+
+    #[test]
+    fn test_no_duplicates_diamond_dependency() {
+        // Diamond dependency pattern:
+        //        root
+        //       /    \
+        //   left     right
+        //       \    /
+        //       bottom
+        //
+        // bottom depends on both left and right, which both depend on root.
+        // bottom should only appear once.
+        let issues = vec![
+            make_issue_with_deps("root", "Root", vec![]),
+            make_issue_with_deps("left", "Left", vec!["root"]),
+            make_issue_with_deps("right", "Right", vec!["root"]),
+            make_issue_with_deps("bottom", "Bottom", vec!["left", "right"]),
+        ];
+
+        let mut dep_expanded = HashSet::new();
+        dep_expanded.insert("root".to_string());
+        dep_expanded.insert("left".to_string());
+        dep_expanded.insert("right".to_string());
+
+        let tree = IssueTree::from_issues(
+            issues,
+            HashSet::new(),
+            dep_expanded,
+            HashSet::new(),
+            HierarchyMode::DependencyBased
+        );
+
+        // bottom should appear exactly once
+        let count = tree.visible_items.iter()
+            .filter(|id| *id == "bottom")
+            .count();
+        assert_eq!(count, 1, "bottom should appear exactly once in diamond pattern");
+
+        // All 4 items should be visible
+        assert_eq!(tree.visible_items.len(), 4);
+    }
+
+    #[test]
+    fn test_no_duplicates_deeply_nested_multi_parent() {
+        // Deep nesting with multi-parent at the bottom:
+        //   root -> a -> b -> c -> shared
+        //   root -> x -> y -> shared
+        //
+        // shared has paths at depth 4 (via a->b->c) and depth 3 (via x->y)
+        let issues = vec![
+            make_issue_with_deps("root", "Root", vec![]),
+            make_issue_with_deps("a", "A", vec!["root"]),
+            make_issue_with_deps("b", "B", vec!["a"]),
+            make_issue_with_deps("c", "C", vec!["b"]),
+            make_issue_with_deps("x", "X", vec!["root"]),
+            make_issue_with_deps("y", "Y", vec!["x"]),
+            make_issue_with_deps("shared", "Shared", vec!["c", "y"]),
+        ];
+
+        let mut dep_expanded = HashSet::new();
+        for id in ["root", "a", "b", "c", "x", "y"] {
+            dep_expanded.insert(id.to_string());
+        }
+
+        let tree = IssueTree::from_issues(
+            issues,
+            HashSet::new(),
+            dep_expanded,
+            HashSet::new(),
+            HierarchyMode::DependencyBased
+        );
+
+        // shared should appear exactly once
+        let count = tree.visible_items.iter()
+            .filter(|id| *id == "shared")
+            .count();
+        assert_eq!(count, 1, "shared should appear exactly once even with deep nesting");
+
+        // All 7 items should be visible
+        assert_eq!(tree.visible_items.len(), 7);
     }
 }

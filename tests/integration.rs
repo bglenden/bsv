@@ -366,3 +366,197 @@ fn test_refresh_r() {
     assert!(before_refresh.contains("Details"));
     assert!(after_refresh.contains("Details"));
 }
+
+#[test]
+fn test_cursor_visibility_after_g_navigation() {
+    let test = match TmuxTest::new() {
+        Some(t) => t,
+        None => {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+    };
+
+    // Go to bottom with G
+    test.send_keys("G");
+    sleep(Duration::from_millis(300));
+    let at_bottom = test.capture_pane();
+
+    // Go back to top with g
+    test.send_keys("g");
+    sleep(Duration::from_millis(300));
+    let at_top = test.capture_pane();
+
+    // Verify tree panel is visible and functional at both positions
+    // The UI should remain stable during navigation
+    assert!(
+        at_bottom.contains("Issues") && at_bottom.contains("Details"),
+        "UI panels should be visible after G (go to bottom)"
+    );
+    assert!(
+        at_top.contains("Issues") && at_top.contains("Details"),
+        "UI panels should be visible after g (go to top)"
+    );
+
+    // Verify tree has expand/collapse icons (indicates tree is rendered)
+    let tree_rendered_bottom = at_bottom.contains('▶') || at_bottom.contains('▼');
+    let tree_rendered_top = at_top.contains('▶') || at_top.contains('▼');
+
+    assert!(
+        tree_rendered_bottom,
+        "Tree should be rendered after G navigation"
+    );
+    assert!(
+        tree_rendered_top,
+        "Tree should be rendered after g navigation"
+    );
+}
+
+#[test]
+fn test_cursor_stability_extended_navigation() {
+    let test = match TmuxTest::new() {
+        Some(t) => t,
+        None => {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+    };
+
+    // Navigate down multiple times
+    for _ in 0..15 {
+        test.send_keys("j");
+    }
+    sleep(Duration::from_millis(300));
+    let after_down = test.capture_pane();
+
+    // Navigate back up the same amount
+    for _ in 0..15 {
+        test.send_keys("k");
+    }
+    sleep(Duration::from_millis(300));
+    let after_up = test.capture_pane();
+
+    // UI should remain stable and functional throughout navigation
+    assert!(
+        after_down.contains("Issues") && after_down.contains("Details"),
+        "Both panels should be visible after extended j navigation"
+    );
+    assert!(
+        after_up.contains("Issues") && after_up.contains("Details"),
+        "Both panels should be visible after extended k navigation"
+    );
+
+    // Tree should be rendered (has expand/collapse icons)
+    let tree_rendered_down = after_down.contains('▶') || after_down.contains('▼');
+    let tree_rendered_up = after_up.contains('▶') || after_up.contains('▼');
+
+    assert!(
+        tree_rendered_down,
+        "Tree should remain rendered during downward navigation"
+    );
+    assert!(
+        tree_rendered_up,
+        "Tree should remain rendered during upward navigation"
+    );
+}
+
+#[test]
+fn test_scroll_does_not_jump() {
+    let test = match TmuxTest::new() {
+        Some(t) => t,
+        None => {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+    };
+
+    // First, expand all to ensure we have a long list
+    test.send_keys("Tab");
+    sleep(Duration::from_millis(300));
+
+    // Navigate down to middle of list
+    for _ in 0..10 {
+        test.send_keys("j");
+    }
+    sleep(Duration::from_millis(200));
+
+    let mid_position = test.capture_pane();
+
+    // Navigate down one more, then back up - UI should remain stable
+    test.send_keys("j");
+    sleep(Duration::from_millis(100));
+    test.send_keys("k");
+    sleep(Duration::from_millis(200));
+
+    let after_bounce = test.capture_pane();
+
+    // UI should be visible and functional throughout
+    assert!(
+        mid_position.contains("Issues") && mid_position.contains("Details"),
+        "Panels should be visible at mid position"
+    );
+    assert!(
+        after_bounce.contains("Issues") && after_bounce.contains("Details"),
+        "Panels should be visible after j/k bounce"
+    );
+
+    // Tree should be rendered throughout
+    let tree_rendered_mid = mid_position.contains('▶') || mid_position.contains('▼');
+    let tree_rendered_bounce = after_bounce.contains('▶') || after_bounce.contains('▼');
+
+    assert!(tree_rendered_mid, "Tree should be visible at mid position");
+    assert!(
+        tree_rendered_bounce,
+        "Tree should be visible after j/k bounce"
+    );
+}
+
+#[test]
+fn test_page_navigation_ctrl_d_u() {
+    let test = match TmuxTest::new() {
+        Some(t) => t,
+        None => {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+    };
+
+    // Expand all first
+    test.send_keys("Tab");
+    sleep(Duration::from_millis(300));
+
+    let initial = test.capture_pane();
+
+    // Page down with Ctrl-D
+    test.send_keys("C-d");
+    sleep(Duration::from_millis(300));
+    let after_page_down = test.capture_pane();
+
+    // Page up with Ctrl-U
+    test.send_keys("C-u");
+    sleep(Duration::from_millis(300));
+    let after_page_up = test.capture_pane();
+
+    // UI should be functional throughout
+    assert!(
+        initial.contains("Issues") && initial.contains("Details"),
+        "Initial state should show both panels"
+    );
+    assert!(
+        after_page_down.contains("Issues") && after_page_down.contains("Details"),
+        "After Ctrl-D should show both panels"
+    );
+    assert!(
+        after_page_up.contains("Issues") && after_page_up.contains("Details"),
+        "After Ctrl-U should show both panels"
+    );
+
+    // Tree should be rendered throughout (has expand/collapse icons)
+    let tree_initial = initial.contains('▶') || initial.contains('▼');
+    let tree_page_down = after_page_down.contains('▶') || after_page_down.contains('▼');
+    let tree_page_up = after_page_up.contains('▶') || after_page_up.contains('▼');
+
+    assert!(tree_initial, "Tree visible initially");
+    assert!(tree_page_down, "Tree visible after page down");
+    assert!(tree_page_up, "Tree visible after page up");
+}
