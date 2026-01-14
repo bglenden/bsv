@@ -328,8 +328,13 @@ fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: b
                 };
 
                 // Status-based styling: green=ready, red=blocked, gray=closed
+                // Use lighter gray when selected for contrast against DarkGray background
                 let text_style = if is_closed {
-                    Style::default().fg(Color::DarkGray)
+                    if is_selected {
+                        Style::default().fg(Color::Gray)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    }
                 } else if is_ready {
                     Style::default().fg(Color::Green)
                 } else {
