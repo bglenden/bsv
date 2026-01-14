@@ -337,8 +337,11 @@ fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: b
                 };
 
                 // Multi-parent issues in dependency view show ID in cyan
+                // Use lighter color when selected for contrast against DarkGray background
                 let id_style = if is_multi_parent && tree.hierarchy_mode == HierarchyMode::DependencyBased {
                     Style::default().fg(Color::Cyan)
+                } else if is_selected {
+                    Style::default().fg(Color::Gray)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
