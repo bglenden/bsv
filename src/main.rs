@@ -858,7 +858,7 @@ fn main() -> Result<()> {
         // Update tree scroll to keep cursor visible
         app.update_tree_scroll(size.height);
         terminal.draw(|frame| {
-            ui::render(frame, &app.tree, app.selected_details.as_ref(), app.show_help, app.focus, app.detail_scroll, app.edit_state.as_ref(), app.panel_ratio, app.tree_scroll);
+            ui::render(frame, &app.tree, app.selected_details.as_ref(), app.show_help, app.focus, app.detail_scroll, app.edit_state.as_ref(), app.panel_ratio, app.tree_scroll, bd::is_daemon_slow());
         })?;
 
         // Check for file changes (non-blocking) with debounce

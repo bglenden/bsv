@@ -152,7 +152,7 @@ impl IssueTree {
             ready_ids,
             visible_items: vec![],
             cursor: 0,
-            show_closed: true,
+            show_closed: false,
             hierarchy_mode,
         };
 
@@ -984,12 +984,15 @@ mod tests {
             HierarchyMode::IdBased
         );
 
+        // Toggle show_closed to true (default is now false)
+        tree.toggle_show_closed();
+
         // With show_closed = true, both should be visible
         assert_eq!(tree.visible_items.len(), 2);
         assert!(tree.visible_items.contains(&"parent".to_string()));
         assert!(tree.visible_items.contains(&"parent.1".to_string()));
 
-        // Toggle show_closed to false
+        // Toggle show_closed back to false
         tree.toggle_show_closed();
 
         // Now only the open child should be visible
@@ -1014,7 +1017,7 @@ mod tests {
         expanded.insert("root".to_string());
         expanded.insert("root.1".to_string());
 
-        let mut tree = IssueTree::from_issues(
+        let tree = IssueTree::from_issues(
             issues,
             expanded,
             HashSet::new(),
@@ -1022,10 +1025,7 @@ mod tests {
             HierarchyMode::IdBased
         );
 
-        // Toggle show_closed to false
-        tree.toggle_show_closed();
-
-        // Only the open grandchild should be visible
+        // show_closed defaults to false, so only the open grandchild should be visible
         assert_eq!(tree.visible_items.len(), 1);
         assert!(tree.visible_items.contains(&"root.1.1".to_string()));
 
@@ -1055,10 +1055,13 @@ mod tests {
             HierarchyMode::DependencyBased
         );
 
+        // Toggle show_closed to true (default is now false)
+        tree.toggle_show_closed();
+
         // With show_closed = true, both should be visible
         assert_eq!(tree.visible_items.len(), 2);
 
-        // Toggle show_closed to false
+        // Toggle show_closed back to false
         tree.toggle_show_closed();
 
         // Only the open issue should be visible
@@ -1093,11 +1096,14 @@ mod tests {
             HierarchyMode::DependencyBased
         );
 
+        // Toggle show_closed to true (default is now false)
+        tree.toggle_show_closed();
+
         // With show_closed = true, only roots are visible (nothing expanded)
         // closed1 and closed2 are roots, shared_child is not visible yet
         assert_eq!(tree.visible_items.len(), 2);
 
-        // Toggle show_closed to false - now closed items are hidden but auto-traversed
+        // Toggle show_closed back to false - now closed items are hidden but auto-traversed
         tree.toggle_show_closed();
 
         // The shared child should appear only ONCE, not twice

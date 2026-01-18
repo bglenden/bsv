@@ -168,21 +168,21 @@ fn test_toggle_closed_c() {
         }
     };
 
-    // Get initial state (closed issues shown by default)
-    let with_closed = test.capture_pane();
-
-    // Press 'c' to hide closed
-    test.send_keys("c");
+    // Get initial state (closed issues hidden by default)
     let without_closed = test.capture_pane();
 
-    // Press 'c' again to show closed
+    // Press 'c' to show closed
     test.send_keys("c");
-    let with_closed_again = test.capture_pane();
+    let with_closed = test.capture_pane();
+
+    // Press 'c' again to hide closed
+    test.send_keys("c");
+    let without_closed_again = test.capture_pane();
 
     // UI should remain functional
-    assert!(with_closed.contains("Issues"));
     assert!(without_closed.contains("Issues"));
-    assert!(with_closed_again.contains("Issues"));
+    assert!(with_closed.contains("Issues"));
+    assert!(without_closed_again.contains("Issues"));
 }
 
 #[test]

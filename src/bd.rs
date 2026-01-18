@@ -1,6 +1,35 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+/// Threshold for considering the daemon slow (in seconds)
+const SLOW_THRESHOLD_SECS: u64 = 2;
+
+/// Global flag indicating if the bd daemon is slow/unhealthy
+static DAEMON_SLOW: AtomicBool = AtomicBool::new(false);
+
+/// Check if the daemon has been detected as slow
+pub fn is_daemon_slow() -> bool {
+    DAEMON_SLOW.load(Ordering::Relaxed)
+}
+
+/// Run a bd command and track if it's slow
+fn run_bd_command(args: &[&str]) -> Result<std::process::Output> {
+    let start = Instant::now();
+    let output = Command::new("bd")
+        .args(args)
+        .output()
+        .with_context(|| format!("Failed to run bd {}", args.first().unwrap_or(&"")))?;
+
+    let elapsed = start.elapsed();
+    if elapsed > Duration::from_secs(SLOW_THRESHOLD_SECS) {
+        DAEMON_SLOW.store(true, Ordering::Relaxed);
+    }
+
+    Ok(output)
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
@@ -43,10 +72,7 @@ pub struct Dependency {
 #[allow(dead_code)]
 pub fn list_issues() -> Result<Vec<Issue>> {
     // Use --status=all to include closed issues, --limit=0 for unlimited
-    let output = Command::new("bd")
-        .args(["list", "--status=all", "--json", "--limit", "0"])
-        .output()
-        .context("Failed to run bd list")?;
+    let output = run_bd_command(&["list", "--status=all", "--json", "--limit", "0"])?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -61,10 +87,7 @@ pub fn list_issues() -> Result<Vec<Issue>> {
 }
 
 pub fn get_ready_ids() -> Result<std::collections::HashSet<String>> {
-    let output = Command::new("bd")
-        .args(["ready", "--json", "--limit", "0"])
-        .output()
-        .context("Failed to run bd ready")?;
+    let output = run_bd_command(&["ready", "--json", "--limit", "0"])?;
 
     if !output.status.success() {
         // If bd ready fails, return empty set (treat all as not ready)
@@ -78,10 +101,7 @@ pub fn get_ready_ids() -> Result<std::collections::HashSet<String>> {
 }
 
 pub fn get_issue_details(id: &str) -> Result<Option<Issue>> {
-    let output = Command::new("bd")
-        .args(["show", id, "--json"])
-        .output()
-        .context("Failed to run bd show")?;
+    let output = run_bd_command(&["show", id, "--json"])?;
 
     if !output.status.success() {
         return Ok(None);
@@ -97,10 +117,7 @@ pub fn get_issue_details(id: &str) -> Result<Option<Issue>> {
 /// This calls `bd show` with all issue IDs to get complete data.
 pub fn list_issues_with_details() -> Result<Vec<Issue>> {
     // First get the list of issue IDs (unlimited)
-    let list_output = Command::new("bd")
-        .args(["list", "--status=all", "--json", "--limit", "0"])
-        .output()
-        .context("Failed to run bd list")?;
+    let list_output = run_bd_command(&["list", "--status=all", "--json", "--limit", "0"])?;
 
     if !list_output.status.success() {
         let stderr = String::from_utf8_lossy(&list_output.stderr);
@@ -116,16 +133,13 @@ pub fn list_issues_with_details() -> Result<Vec<Issue>> {
     }
 
     // Get all issue IDs
-    let ids: Vec<&str> = basic_issues.iter().map(|i| i.id.as_str()).collect();
+    let ids: Vec<String> = basic_issues.iter().map(|i| i.id.clone()).collect();
 
     // Call bd show with all IDs to get full details including dependencies
-    let mut args = vec!["show", "--json"];
-    args.extend(ids);
+    let mut args: Vec<&str> = vec!["show", "--json"];
+    args.extend(ids.iter().map(|s| s.as_str()));
 
-    let show_output = Command::new("bd")
-        .args(&args)
-        .output()
-        .context("Failed to run bd show")?;
+    let show_output = run_bd_command(&args)?;
 
     if !show_output.status.success() {
         // Fall back to basic list if show fails
@@ -141,10 +155,7 @@ pub fn list_issues_with_details() -> Result<Vec<Issue>> {
 
 /// Update an issue's title
 pub fn update_issue_title(id: &str, title: &str) -> Result<()> {
-    let output = Command::new("bd")
-        .args(["update", id, "--title", title])
-        .output()
-        .context("Failed to run bd update")?;
+    let output = run_bd_command(&["update", id, "--title", title])?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -156,10 +167,7 @@ pub fn update_issue_title(id: &str, title: &str) -> Result<()> {
 
 /// Update an issue's description
 pub fn update_issue_description(id: &str, description: &str) -> Result<()> {
-    let output = Command::new("bd")
-        .args(["update", id, "--description", description])
-        .output()
-        .context("Failed to run bd update")?;
+    let output = run_bd_command(&["update", id, "--description", description])?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

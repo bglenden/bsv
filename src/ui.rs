@@ -274,7 +274,7 @@ fn parse_inline_markdown(text: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Issue>, show_help: bool, focus: crate::Focus, detail_scroll: u16, edit_state: Option<&crate::EditState>, panel_ratio: f32, tree_scroll: usize) {
+pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Issue>, show_help: bool, focus: crate::Focus, detail_scroll: u16, edit_state: Option<&crate::EditState>, panel_ratio: f32, tree_scroll: usize, daemon_slow: bool) {
     // Convert ratio to percentages, clamped to reasonable bounds
     let left_percent = ((panel_ratio.clamp(0.15, 0.85)) * 100.0) as u16;
     let right_percent = 100 - left_percent;
@@ -285,7 +285,7 @@ pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Iss
         .split(frame.area());
 
     let tree_focused = focus == crate::Focus::Tree;
-    render_tree_panel(frame, tree, chunks[0], tree_focused, tree_scroll);
+    render_tree_panel(frame, tree, chunks[0], tree_focused, tree_scroll, daemon_slow);
 
     // Use full details if available (has dependencies), otherwise fall back to tree node
     let issue_for_details = selected_details.or_else(|| tree.selected_node().map(|n| &n.issue));
@@ -296,7 +296,7 @@ pub fn render(frame: &mut Frame, tree: &IssueTree, selected_details: Option<&Iss
     }
 }
 
-fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: bool, tree_scroll: usize) {
+fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: bool, tree_scroll: usize, daemon_slow: bool) {
     use crate::HierarchyMode;
 
     let items: Vec<ListItem> = tree.visible_items
@@ -379,7 +379,14 @@ fn render_tree_panel(frame: &mut Frame, tree: &IssueTree, area: Rect, focused: b
     let list = List::new(items)
         .block(Block::default()
             .title(title)
-            .title_bottom(Line::from(" ? help  d=Epics/Deps ").centered())
+            .title_bottom(Line::from(if daemon_slow {
+                vec![
+                    Span::styled(" bd daemon slow! ", Style::default().fg(Color::Yellow)),
+                    Span::raw("? help  d=Epics/Deps "),
+                ]
+            } else {
+                vec![Span::raw(" ? help  d=Epics/Deps ")]
+            }).centered())
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color)));
 
@@ -1001,7 +1008,7 @@ mod tests {
         let tree = IssueTree::from_issues(issues, expanded, HashSet::new(), ready_ids, HierarchyMode::IdBased);
 
         terminal.draw(|frame| {
-            render_tree_panel(frame, &tree, frame.area(), true, 0);
+            render_tree_panel(frame, &tree, frame.area(), true, 0, false);
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());
@@ -1108,7 +1115,7 @@ mod tests {
         let selected = make_test_issue("bsv-a", "First Issue", "open");
 
         terminal.draw(|frame| {
-            render(frame, &tree, Some(&selected), false, crate::Focus::Tree, 0, None, 0.4, 0);
+            render(frame, &tree, Some(&selected), false, crate::Focus::Tree, 0, None, 0.4, 0, false);
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());
@@ -1131,7 +1138,7 @@ mod tests {
         let tree = IssueTree::from_issues(issues, HashSet::new(), HashSet::new(), HashSet::new(), HierarchyMode::IdBased);
 
         terminal.draw(|frame| {
-            render(frame, &tree, None, true, crate::Focus::Tree, 0, None, 0.4, 0); // show_help = true
+            render(frame, &tree, None, true, crate::Focus::Tree, 0, None, 0.4, 0, false); // show_help = true
         }).unwrap();
 
         let output = buffer_to_string(terminal.backend().buffer());
