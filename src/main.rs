@@ -10,6 +10,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::thread;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Focus {
@@ -232,6 +234,12 @@ impl EditState {
     }
 }
 
+/// Result of background data loading
+struct DataLoadResult {
+    issues: Vec<bd::Issue>,
+    ready_ids: HashSet<String>,
+}
+
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::prelude::*;
 use std::io;
@@ -260,28 +268,35 @@ struct App {
     dragging_divider: bool,
     /// Tree panel scroll offset (for mouse click handling)
     tree_scroll: usize,
+    /// Whether data is currently being loaded
+    is_loading: bool,
+    /// Channel receiver for async data loading
+    data_rx: Option<mpsc::Receiver<DataLoadResult>>,
 }
 
 impl App {
-    fn new() -> Result<Self> {
-        let issues = bd::list_issues_with_details()?;
+    /// Create app with async data loading - returns immediately with loading state
+    fn new_async() -> Self {
         let (expanded, dep_expanded, hierarchy_mode) = state::load_tree_state();
-        let ready_ids = bd::get_ready_ids().unwrap_or_default();
-        let tree = IssueTree::from_issues(issues, expanded, dep_expanded, ready_ids, hierarchy_mode);
-
-        // Fetch details for initially selected issue
-        let selected_details = tree.selected_id()
-            .and_then(|id| bd::get_issue_details(id).ok().flatten());
-        let last_selected_id = tree.selected_id().map(|s| s.to_string());
-
         let panel_ratio = state::load_panel_ratio();
 
-        Ok(App {
+        // Create empty tree initially
+        let tree = IssueTree::from_issues(vec![], expanded.clone(), dep_expanded.clone(), HashSet::new(), hierarchy_mode);
+
+        // Spawn background thread to load data
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let issues = bd::list_issues_with_details().unwrap_or_default();
+            let ready_ids = bd::get_ready_ids().unwrap_or_default();
+            let _ = tx.send(DataLoadResult { issues, ready_ids });
+        });
+
+        App {
             tree,
             should_quit: false,
             show_help: false,
-            selected_details,
-            last_selected_id,
+            selected_details: None,
+            last_selected_id: None,
             focus: Focus::Tree,
             detail_scroll: 0,
             edit_state: None,
@@ -289,7 +304,54 @@ impl App {
             panel_ratio,
             dragging_divider: false,
             tree_scroll: 0,
-        })
+            is_loading: true,
+            data_rx: Some(rx),
+        }
+    }
+
+    /// Handle incoming data from background loading thread
+    fn check_data_loaded(&mut self) {
+        if let Some(rx) = &self.data_rx {
+            if let Ok(result) = rx.try_recv() {
+                // Preserve current state for refresh
+                let selected_id = self.tree.selected_id().map(|s| s.to_string());
+                let show_closed = self.tree.show_closed;
+                let has_existing_tree = !self.tree.visible_items.is_empty();
+
+                // Use current expanded state if we have an existing tree (refresh),
+                // otherwise load from disk (initial load)
+                let (expanded, dep_expanded) = if has_existing_tree {
+                    (self.tree.expanded.clone(), self.tree.dep_expanded.clone())
+                } else {
+                    let (e, de, _) = state::load_tree_state();
+                    (e, de)
+                };
+
+                self.tree = IssueTree::from_issues(
+                    result.issues,
+                    expanded,
+                    dep_expanded,
+                    result.ready_ids,
+                    self.hierarchy_mode,
+                );
+                self.tree.show_closed = show_closed;
+                self.tree.rebuild_visible();
+
+                // Restore cursor to previously selected item if it still exists
+                if let Some(id) = selected_id {
+                    if let Some(pos) = self.tree.visible_items.iter().position(|x| x == &id) {
+                        self.tree.cursor = pos;
+                    }
+                }
+
+                // Force refresh of selected details
+                self.last_selected_id = None;
+                self.update_selected_details();
+
+                self.is_loading = false;
+                self.data_rx = None;
+            }
+        }
     }
 
     fn update_selected_details(&mut self) {
@@ -307,34 +369,23 @@ impl App {
         self.detail_scroll = new_scroll.max(0) as u16;
     }
 
+    /// Start async refresh - spawns background thread to reload data
     fn refresh(&mut self) {
-        // Preserve current state
-        let selected_id = self.tree.selected_id().map(|s| s.to_string());
-        let show_closed = self.tree.show_closed;
-
-        if let Ok(issues) = bd::list_issues_with_details() {
-            let ready_ids = bd::get_ready_ids().unwrap_or_default();
-            self.tree = IssueTree::from_issues(
-                issues,
-                self.tree.expanded.clone(),
-                self.tree.dep_expanded.clone(),
-                ready_ids,
-                self.hierarchy_mode,
-            );
-            self.tree.show_closed = show_closed;
-            self.tree.rebuild_visible();
-
-            // Restore cursor to previously selected item if it still exists
-            if let Some(id) = selected_id {
-                if let Some(pos) = self.tree.visible_items.iter().position(|x| x == &id) {
-                    self.tree.cursor = pos;
-                }
-            }
-
-            // Force refresh of selected details
-            self.last_selected_id = None;
-            self.update_selected_details();
+        // Don't start a new refresh if one is already in progress
+        if self.is_loading {
+            return;
         }
+
+        // Spawn background thread to load data
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let issues = bd::list_issues_with_details().unwrap_or_default();
+            let ready_ids = bd::get_ready_ids().unwrap_or_default();
+            let _ = tx.send(DataLoadResult { issues, ready_ids });
+        });
+
+        self.is_loading = true;
+        self.data_rx = Some(rx);
     }
 
     /// Check if we're currently in edit mode
@@ -847,18 +898,21 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Create app
-    let mut app = App::new()?;
+    // Create app with async loading
+    let mut app = App::new_async();
     let mut last_refresh = Instant::now();
     let refresh_cooldown = Duration::from_millis(500);
 
     // Main loop
     loop {
+        // Check for async data loading completion
+        app.check_data_loaded();
+
         let size = terminal.size()?;
         // Update tree scroll to keep cursor visible
         app.update_tree_scroll(size.height);
         terminal.draw(|frame| {
-            ui::render(frame, &app.tree, app.selected_details.as_ref(), app.show_help, app.focus, app.detail_scroll, app.edit_state.as_ref(), app.panel_ratio, app.tree_scroll, bd::is_daemon_slow());
+            ui::render(frame, &app.tree, app.selected_details.as_ref(), app.show_help, app.focus, app.detail_scroll, app.edit_state.as_ref(), app.panel_ratio, app.tree_scroll, bd::is_daemon_slow(), app.is_loading);
         })?;
 
         // Check for file changes (non-blocking) with debounce

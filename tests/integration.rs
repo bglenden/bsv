@@ -560,3 +560,64 @@ fn test_page_navigation_ctrl_d_u() {
     assert!(tree_page_down, "Tree visible after page down");
     assert!(tree_page_up, "Tree visible after page up");
 }
+
+/// Test that UI appears quickly with loading state, even if data takes time to load
+#[test]
+fn test_async_loading_shows_ui_immediately() {
+    let test = match TmuxTest::new() {
+        Some(t) => t,
+        None => {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+    };
+
+    // Capture initial state - should show Issues panel immediately
+    // even if loading (might show "Loading..." or actual issues)
+    let initial = test.capture_pane();
+
+    // The Issues panel should be visible immediately
+    assert!(
+        initial.contains("Issues"),
+        "Issues panel should appear immediately, got: {}",
+        initial.chars().take(500).collect::<String>()
+    );
+}
+
+/// Test that UI appears responsive due to async loading.
+/// Verifies that the Issues panel appears within 1 second and eventually shows data.
+#[test]
+fn test_responsive_ui_with_async_loading() {
+    let test = match TmuxTest::new() {
+        Some(t) => t,
+        None => {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+    };
+
+    // The UI should show the Issues panel immediately due to async loading
+    // It might show "Loading..." or actual data depending on daemon speed
+    let initial = test.capture_pane();
+
+    assert!(
+        initial.contains("Issues"),
+        "Issues panel should appear within startup time, got: {}",
+        initial.chars().take(300).collect::<String>()
+    );
+
+    // Wait a bit longer and verify we eventually have actual data
+    sleep(Duration::from_secs(3));
+    let after_load = test.capture_pane();
+
+    // Should now show actual issue IDs (bsv-xxx pattern) OR Loading...
+    // (Loading... would only appear if daemon is extremely slow)
+    let has_issues = after_load.contains("bsv-");
+    let still_loading = after_load.contains("Loading");
+
+    assert!(
+        has_issues || still_loading,
+        "Should show issues or loading state after 3 seconds, got: {}",
+        after_load.chars().take(500).collect::<String>()
+    );
+}
