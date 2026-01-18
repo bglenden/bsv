@@ -42,9 +42,9 @@ pub struct Dependency {
 
 #[allow(dead_code)]
 pub fn list_issues() -> Result<Vec<Issue>> {
-    // Use --status=all to include closed issues
+    // Use --status=all to include closed issues, --limit=0 for unlimited
     let output = Command::new("bd")
-        .args(["list", "--status=all", "--json"])
+        .args(["list", "--status=all", "--json", "--limit", "0"])
         .output()
         .context("Failed to run bd list")?;
 
@@ -96,9 +96,9 @@ pub fn get_issue_details(id: &str) -> Result<Option<Issue>> {
 /// List all issues with full details including dependencies.
 /// This calls `bd show` with all issue IDs to get complete data.
 pub fn list_issues_with_details() -> Result<Vec<Issue>> {
-    // First get the list of issue IDs
+    // First get the list of issue IDs (unlimited)
     let list_output = Command::new("bd")
-        .args(["list", "--status=all", "--json"])
+        .args(["list", "--status=all", "--json", "--limit", "0"])
         .output()
         .context("Failed to run bd list")?;
 
