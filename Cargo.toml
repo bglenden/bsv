@@ -1,6 +1,6 @@
 [package]
 name = "bsv"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
 license = "MIT"
 description = "A terminal UI for viewing Beads issues"
@@ -16,3 +16,4 @@ serde_json = "1.0"
 dirs = "5.0"
 anyhow = "1.0"
 notify = "6.1"
+arboard = "3"

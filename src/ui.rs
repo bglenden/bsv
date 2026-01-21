@@ -431,7 +431,7 @@ fn render_detail_panel(frame: &mut Frame, issue: Option<&Issue>, ready_ids: &std
     };
 
     let border_color = if focused { Color::Cyan } else { Color::DarkGray };
-    let title = if focused { " Details (j/k to scroll, e=edit, i=title) " } else { " Details " };
+    let title = if focused { " Details (j/k scroll, e=edit, y=copy) " } else { " Details " };
 
     let paragraph = Paragraph::new(content)
         .block(Block::default()
@@ -703,6 +703,7 @@ fn render_help_overlay(frame: &mut Frame) {
         Line::from("  g / G         Top/bottom"),
         Line::from("  h / ←         Return to tree"),
         Line::from("  e / i         Edit description / title"),
+        Line::from("  y             Copy issue to clipboard"),
         Line::from(""),
         Line::from(Span::styled("Edit Mode", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  Esc           Cancel editing"),
@@ -729,6 +730,11 @@ fn render_help_overlay(frame: &mut Frame) {
             Span::raw("=Blocked "),
             Span::styled("Gray", Style::default().fg(Color::DarkGray)),
             Span::raw("=Closed"),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Cyan ID", Style::default().fg(Color::Cyan)),
+            Span::raw("=Multi-parent (shared dep)"),
         ]),
     ];
 

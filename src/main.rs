@@ -408,6 +408,23 @@ impl App {
         );
     }
 
+    /// Copy the current issue to clipboard
+    fn copy_issue_to_clipboard(&self) -> Result<(), String> {
+        if let Some(issue) = &self.selected_details {
+            let mut text = format!("Title: {}\n", issue.title);
+            if let Some(desc) = &issue.description {
+                if !desc.is_empty() {
+                    text.push('\n');
+                    text.push_str(desc);
+                }
+            }
+            let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+            clipboard.set_text(text).map_err(|e| e.to_string())
+        } else {
+            Err("No issue selected".to_string())
+        }
+    }
+
     /// Start editing a field of the current issue
     fn start_edit(&mut self, field: EditField) {
         if let Some(issue) = &self.selected_details {
@@ -744,6 +761,11 @@ impl App {
                 self.start_edit(EditField::Title);
             }
 
+            // 'y' yanks (copies) issue to clipboard
+            (KeyCode::Char('y'), KeyModifiers::NONE) => {
+                let _ = self.copy_issue_to_clipboard();
+            }
+
             _ => {}
         }
     }
@@ -813,6 +835,7 @@ fn print_help() {
     println!("    h/←        Return to tree");
     println!("    e          Edit description");
     println!("    i          Edit title");
+    println!("    y          Copy issue to clipboard");
     println!();
     println!("EDIT MODE:");
     println!("    Esc        Cancel editing");
